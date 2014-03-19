@@ -1,0 +1,2 @@
+select ip,INET_NTOA(ip) as addr,count,timestampdiff(minute,first,last) as dur_min,timestampdiff(minute,last,now()) as since_min from blocked;
+insert ignore into blocked (ip) values(inet_aton("a.b.c.d"));

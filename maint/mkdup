@@ -1,0 +1,315 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+# Two modes of operation depending on filename.
+
+# mkdup:
+#
+# Generate a list of duplicates using iqdb.
+#
+# This script maintains an iqdb database along with a
+# list of filenames it contains. When running the script,
+# new files are added and deleted files removed, and then
+# iqdb's find_duplicate function invoked. Its output is
+# parsed and written to dupes.lst. This file can for
+# instance be opened as a collection in gqview.
+#
+# The file dupes.txt is read and filenames listed there
+# are excluded. Put in it the files which are dupes (or
+# near-dupes) that you want to keep nonetheless but don't
+# want to see again each time mkdup is run.
+# See below for settings you may want to change.
+#
+# Usage:
+# ./mkdup [<mindev> [<dirs>]]
+#
+# <mindev> is the standard deviation in similarity values
+#	that is considered a match. If not specified, then
+#	$mindev_default is used. Useful values are 5-10,
+#	depending on how self-similar your images are.
+# <dirs> is the directories to search. All jpeg, png and
+#	gif files in them will be indexed. If not set,
+#	then @defdirs will be used.
+#
+# The file ~/.mkdup.rc may contain configuration settings,
+# with the following settings that are useful to change.
+# Simply put them there without the "our". You can also
+# put mkdup.cfg in the current directory, for settings
+# specific to that directory if you like.
+
+# imgSeek:
+# Mostly same as above, but using imgSeek.cfg and
+# ./imgSeek <image to search>
+#
+# Searches for matches to the given image in the DB.
+
+my $mode = substr $0, 1 + index $0, "/";
+my $imgSeek = $mode eq 'imgSeek';
+my $mkdup = $mode eq 'mkdup';
+die "Unknown mode $mode!\n" unless $imgSeek or $mkdup;
+
+our $mindev_default = 7;			# Default minimum std.deviation for a match.
+our @defdirs = ("sorted", "unsorted", "extra");	# Default directories to search.
+
+our $ignore_RE = qr#/.thumbnails#;		# Regular expression for files to exclude based on the filename.
+
+
+# Other settings that might be useful.
+our $db_file = "dupes.db";	# iqdb database file.
+our $id_file = "dupes.fdb";	# database holding filename and image ID mapping.
+our $exclude_file = "dupes.txt";# file holding images to exclude from the dupe checking.
+our $chdir = "";		# directory to change to (if not empty)
+our $chdir_out = "";		# same directory to use for the dupe output
+our $links = 0;			# set to 1 to not ignore symlinks
+
+#
+# No user-servicable parts below.
+#
+
+use Digest::MD5 qw(md5_hex);
+use Image::Info qw(image_info);
+use File::Find;
+use Storable qw(store_fd fd_retrieve);
+
+our ($normalize,$endcommands);
+eval `cat $ENV{HOME}/.mkdup.rc` if -e "$ENV{HOME}/.mkdup.rc"; die "Error in ~/.mkdup.rc: $@" if $@;
+eval `cat $mode.cfg` if -e "$mode.cfg"; die "Error in $mode.cfg: $@" if $@;
+
+my $mindev;
+if ($mkdup) {
+$mindev = shift;
+if (!$mindev) {
+	$mindev = $mindev_default;
+	print "Minimum std.dev. not given, using $mindev%.\n";
+}
+}
+my $flags;
+my @dirs;
+my @imgs;
+
+for (@ARGV) {
+	if (/^-/) {
+		$flags .= " $_";
+	} elsif ($mkdup) {
+		push @dirs, $_;
+	} elsif ($imgSeek) {
+		push @imgs, $_;
+	}
+}
+@dirs = @defdirs unless @dirs;
+
+my $db_file_bak = "$db_file.bak";
+if ($chdir) {
+	chdir $chdir or die "Can't chdir to $chdir: $!\n";
+	$chdir = "$chdir/" unless $chdir =~ m#/$#;	## deconfuse vim
+	$chdir_out = $chdir unless $chdir_out;
+}
+
+$| = 1;
+
+my %exclude;
+if (open my $dupes, "<", $exclude_file) { while (<$dupes>) {
+	next if /^\s*#/;
+	chomp;
+	$normalize->() if $normalize;
+	$exclude{$_} = 1;
+	warn "$_ does not exist\n" unless -e;
+} }
+%exclude = () if $flags and $flags =~ /-i/;
+
+my $idlist;
+if (-e $id_file) {
+	open my $bzip, "-|", "bzcat", $id_file or die "Can't run bzcat: $!\n";
+	$idlist = fd_retrieve $bzip;
+	close $bzip or die "Can't close bzcat: $!\n";
+} else {
+	$idlist = { idlist => { }, files => { }, nextid => 1 };
+	print STDERR "No ID file.\n";
+}
+
+my %files;
+sub add {
+	our $lastlen ||= 0;
+	return if m/$ignore_RE/;
+	if (-d) {
+		print;
+		print " " x ($lastlen - length) if $lastlen > length;
+		print "\r" if -d;
+		$lastlen = length;
+		return;
+	}
+	if (-l && !$links) {
+		warn "Dangling link: $_\n" unless -e;
+		return;
+	}
+	warn "$_ not found\n" unless -e;
+	#print "Excluding $_\n" if $exclude{$_};
+	return if $exclude{$_} or not /\.(?:jpe?g|png|gif)$/;
+
+	$files{$_} = 1;
+}
+
+find { wanted => \&add, no_chdir => 1, follow => 1, follow_skip => 2 }, @dirs;
+
+print scalar keys %files, " files found. ", scalar keys %{$idlist->{ids}}, " IDs and ", scalar keys %{$idlist->{files}}, " files in DB.\n";
+warn "No files found in DB.\n" unless %{$idlist->{ids}};
+
+print "Redirecting stderr to $mode.err.\n";
+open my $old_stderr, ">&STDERR" or die "Can't dup stderr: $!\n";
+open STDERR, ">", "$mode.err" or die "Can't write $mode.err: $!\n";
+
+# tee iqdb.cmd|
+open my $iqdb, "|-", "iqdb command $db_file".q(|perl -ne 'BEGIN{$|=1;}next if /^000/ or /duplicate_id/;print "\n" if /^3/;s/\\n$/\\r/ if /^100/;print') or die "Can't run iqdb: $!\n";
+select $iqdb; $|=1; select STDOUT;
+my $didadd = 0;
+for (sort keys %files) {
+	++$idlist->{ids}{$idlist->{files}{$_}} and next if $idlist->{files}{$_};
+
+	my $id = sprintf "%08x", $idlist->{nextid}++;
+	#print "\nNew ID $id for $_\n";
+
+	system "cp", "-va", $db_file, $db_file_bak unless $didadd;
+
+	print $iqdb "add 0 $id:$_\n";
+	$idlist->{files}{$_} = $id;
+	$idlist->{ids}{$id} = 1;
+	$didadd++;
+}
+my $didremove = 0;
+for (keys %{$idlist->{files}}) {
+	my $id = $idlist->{files}{$_};
+	next if $idlist->{ids}{$id} == 1;
+	system "cp", "-va", $db_file, $db_file_bak unless $didadd or $didremove;
+	print "ID $id = $_ disappeared, removing.\n";
+	print $iqdb "remove 0 $id\n";
+	delete $idlist->{ids}{$id};
+	delete $idlist->{files}{$_};
+	$didremove++;
+}
+print "$didadd images added and $didremove images removed.\n";
+#print $iqdb "rehash 0\n" if $didremove;
+#if ($didremove or $didadd) {
+#	print $iqdb "saveas 0 $db_file_tmp\n";
+#}
+close $iqdb or die "Can't close iqdb: $!\n";
+print "Now have ", scalar keys %files, " files. ", scalar keys %{$idlist->{ids}}, " IDs and ", scalar keys %{$idlist->{files}}, " files in DB. Next ID $idlist->{nextid}.\n";
+
+my @toremove;
+open $iqdb, "-|", "iqdb", "list", $db_file or die "Can't run iqdb: $!\n";
+while (<$iqdb>) {
+	chomp;
+	unless (exists $idlist->{ids}{$_}) {
+		die "$_ in iqdb but not file DB\n";
+		push @toremove, $_;
+		next;
+	}
+	die "$_ is 0 in file DB\n" unless $idlist->{ids}{$_} == 1;
+	$idlist->{ids}{$_} = 0;
+}
+close $iqdb or die "Can't close iqdb: $!\n";
+
+if (@toremove) {
+	#tee -a iqdb.cmd|
+	open $iqdb, "|-", "iqdb", "command", $db_file or die "Can't run iqdb: $!\n";
+	select $iqdb; $|=1; select STDOUT;
+	system "cp", "-va", $db_file, $db_file_bak unless $didadd or $didremove;
+	print $iqdb "remove 0 $_\n" for @toremove;
+	#$db_file_tmp = "$db_file.tmp";
+	#print $iqdb "rehash 0\nsaveas 0 $db_file_tmp\n";
+	close $iqdb or die "Can't close iqdb: $!\n";
+}
+
+for (keys %{$idlist->{ids}}) {
+	next if $idlist->{ids}{$_} == 0;
+	#die "$_ in file but not iqdb DB\n";
+	delete $idlist->{ids}{$_};
+
+	my $file;
+	for my $k (keys %{$idlist->{files}}) {
+		next unless $idlist->{files}{$k} eq $_;
+		$file = $k;
+		last;
+	}
+	if ($file) {
+		warn "$_=$file in file but not iqdb DB\n";
+		delete $idlist->{files}{$file};
+	} else {
+		warn "$_ has no file, discarded.\n";
+	}
+}
+
+open my $bzip, "|-", "bzip2 > $id_file.tmp" or die "Can't run bzip2: $!\n";
+store_fd $idlist, $bzip;
+close $bzip or die "Can't close bzcat: $!\n";
+
+rename "$id_file.tmp", $id_file or die "Can't rename ID file: $!\n";
+#rename $db_file_tmp, $db_file or die "Can't rename DB file: $!\n" if $db_file_tmp;
+unlink "iqdb.cmd";
+
+open STDERR, ">&", $old_stderr or die "Can't reopen old stderr: $!\n";
+
+for my $k (keys %{$idlist->{files}}) {
+	$idlist->{ids}{$idlist->{files}{$k}} = $k;
+}
+
+if ($mkdup) {
+print "Getting dupe list...\n";
+open $iqdb, "-|", "iqdb", "find_duplicates", $db_file, $mindev or die "Can't run iqdb: $!\n";
+open my $dupes, ">", "$ENV{HOME}/.gqview/collections/duplicates.gqv" or die "Can't write duplicates: $!\n";
+
+my $groupcnt = 0;
+my $dupecnt = 0;
+while (<$iqdb>) {
+	chomp;
+	next if /^000 /;
+	warn "Reply $_ not understood\n" and next unless s/^202 //;
+	my @dupes = split " ", $_;
+	for (@dupes) {
+		if (s/:([0-9.-]+)//) {
+			print $dupes qq(# Similarity $1\n);
+			$dupecnt++;
+		} elsif (s/=([0-9.-]+)//) {
+			print $dupes qq(# New group, std.dev $1\n);
+			$groupcnt++;
+		} else {
+			warn "Reply $_ not understood\n";
+			next;
+		}
+		warn "$_ in duplicate list but not file DB\n" and next unless exists $idlist->{ids}{$_};
+		print $dupes qq("$chdir_out$idlist->{ids}{$_}"\n);
+	}
+}
+
+close $iqdb or die "Can't close iqdb: $!\n";
+close $dupes or die "Can't close dupes: $!\n";
+print "$dupecnt dupes in $groupcnt groups.\n";
+}
+if ($imgSeek and @imgs) {
+for (@imgs) { die "Not a file: $_\n" unless -f };
+open my $dupes, ">", "$ENV{HOME}/.gqview/collections/duplicates.gqv" or die "Can't write duplicates: $!\n";
+my $commands = "load 0 simple $db_file\\n" . join "", (map "query 0 0 16 $_\n", @imgs), "done now\\n";
+open $iqdb, "echo -e '$commands'|iqdb command|" or die "Can't run iqdb: $!\n";
+while(<$iqdb>) { last if /^000 /; }
+while(<$iqdb>) { last if /^000 /; }
+while(@imgs) {
+print "Finding matches to $imgs[0]...\n";
+print $dupes qq("$imgs[0]"\n);
+while (<$iqdb>) {
+	chomp;
+	if (/^3/) { print "$_\n"; shift @imgs; last; }
+	if (/^000 /) { shift @imgs; last; }
+	warn "Reply $_ not understood\n" and next unless /^200 ([0-9a-f]+) ([0-9+-.]+) (\d+) (\d+)$/;
+	#my $id = hex $1;
+	print $dupes qq(# Similarity $2\n);
+	warn "$_ in duplicate list but not file DB\n" and next unless exists $idlist->{ids}{$1};
+	print $dupes qq("$chdir_out$idlist->{ids}{$1}"\n);
+}
+}
+
+close $iqdb or die "Can't close iqdb: $!\n";
+close $dupes or die "Can't close dupes: $!\n";
+}
+
+$endcommands->() if $endcommands;

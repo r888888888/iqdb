@@ -1,0 +1,106 @@
+#!/bin/bash
+
+cd /home/iqdb/src
+export HOME=/home/iqdb
+
+EC=0
+LOCKFILE=update.lock
+if ! ( set -o noclobber; echo "$$" > "$LOCKFILE") 2> /dev/null; then
+	echo Failed to obtain lock, aborting.
+	LOCKPID=`cat "$LOCKFILE"`
+	echo Held by pid $LOCKPID: `cat /proc/$LOCKPID/cmdline`
+	exit 1;
+fi
+
+[ "$1" = "lock" ] && exit 0
+
+trap 'rm -f "$LOCKFILE"' HUP INT QUIT TERM EXIT
+
+export http_proxy=http://localhost:3128/
+
+MODE="$1"
+shift
+if [ "$MODE" = "auto" ]; then
+	MODE=`perl -le 'print 2<24*-M $ARGV[0]?"full":"update"' ~/doujin/.lastfullupdate`
+fi;
+FLAG=""
+if [ "$MODE" = "complete" ]; then
+	echo Complete update
+	FLAG="-l";
+fi;
+if [ "$MODE" = "update" -o "$MODE" = "complete" ]; then
+	echo Quick update
+
+	./danbooru-change $FLAG danbooru &
+	./danbooru-change $FLAG konachan &
+	./danbooru-change $FLAG moeimouto &
+	#./danbooru-change $FLAG 4scrape &
+	./danbooru-change $FLAG gelbooru &
+	./danbooru-change $FLAG sankaku &
+	./danbooru-change $FLAG e_shuushuu &
+	./danbooru-change $FLAG anigal &
+	./danbooru-change $FLAG zerochan &
+	./danbooru-change $FLAG mangadrawing &
+	./danbooru-change $FLAG anime-pictures &
+	./danbooru-change $FLAG 3dbooru &
+	#./danbooru-change $FLAG nekobooru &
+	./danbooru-change $FLAG idol &
+
+	jobs -l
+
+	JOB=1
+	while wait %$JOB ; RESULT=$? && [ $RESULT -ne 127 ]; do
+		[ $RESULT -eq 0 ] || let EC=$EC+1
+		echo Job $JOB exit status: $RESULT 2>&1
+		let JOB=$JOB+1
+	done
+
+	jobs -l
+
+	wait
+
+	touch ~/doujin/.lastquickupdate ~/doujin/.lastupdate
+	if [ "$MODE" != "complete" ]; then exit $EC; fi
+fi;
+if [ "$MODE" = "full" -o "$MODE" = "complete" ]; then
+	echo Full update
+
+	./danbooru-change $FLAG danbooru   full &
+	./danbooru-change $FLAG konachan   full &
+	./danbooru-change $FLAG moeimouto  full &
+	#./danbooru-change $FLAG 4scrape &
+	./danbooru-change $FLAG gelbooru   full &
+	./danbooru-change $FLAG gelbooru   delete &
+	./danbooru-change $FLAG sankaku    full &
+	./danbooru-change $FLAG e_shuushuu full &
+	./danbooru-change $FLAG anigal     full &
+	./danbooru-change $FLAG zerochan &
+	./danbooru-change $FLAG mangadrawing &
+	./danbooru-change $FLAG anime-pictures &
+	./danbooru-change $FLAG 3dbooru    full &
+	#./danbooru-change $FLAG nekobooru  full &
+	./danbooru-change $FLAG idol       full &
+
+	jobs -l
+
+	JOB=1
+	while wait %$JOB ; RESULT=$? && [ $RESULT -ne 127 ]; do
+		[ $RESULT -eq 0 ] || let EC=$EC+1
+		echo Job $JOB exit status: $RESULT 1>&2
+		let JOB=$JOB+1
+	done
+
+	jobs -l
+
+	wait
+
+	touch -r ~/doujin/anime-pictures/.lastid ~/doujin/anime-pictures/.lastchange
+	touch -r ~/doujin/zerochan/.lastid ~/doujin/zerochan/.lastchange
+	touch -r ~/doujin/mangadrawing/.lastid ~/doujin/mangadrawing/.lastchange
+
+	touch ~/doujin/.lastfullupdate ~/doujin/.lastupdate
+	exit $EC
+elif [ "$MODE" != "restart" ]; then
+	echo Unknown mode, run as $0 auto/update/full/restart
+	exit 1;
+fi;

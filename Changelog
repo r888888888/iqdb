@@ -1,0 +1,91 @@
+iqdb-20130824:
+- fix include files for newer gcc
+- updated scripts
+
+iqdb-20091112:
+- add "sim" command to server mode
+- various improvements in danbooru-change script
+
+iqdb-20090612:
+- add imgseek mode to dupe finder script that searches for a
+  given image file in the dupe database
+- fix wrong transparent png background color
+- add int size and endianness check
+- some minor fixes to allow it to compile on Debian Lenny
+- add platform-independent 64bit DB file mode and make it the default
+- auto-convert on load if int sizes don't match, see README
+  for details on how to do a permanent conversion to 64bit mode
+- allow querying by image data literal (instead of filename)
+- allow limiting iqdb queries to a few IP addresses using
+  -s <IP/hostname> (can be given multiple times)
+- allow to return only relevant results that exceed a minimum
+  standard deviation, set using "queryopt mindev <min.std.dev.>"
+- report number of results that follow for every query, using
+  a "101 matches=<number>" reply
+- allow setting debug level at start with -d and while running
+  with the "debuglevel <level>" command
+
+iqdb-20081123:
+- make it compile with g++ 4.3.x
+- add maintenance commands to list, load, save and drop databases
+  without restarting the server
+- listen mode can now listen on two sockets, only one of which
+  supports maintenance commands, and whose pending requests will
+  be serviced before those on the other (low priority) socket
+- make it compile on *BSD (missing include)
+- fix crash in delta_queue (ungodly memory consumption)
+  on 64bit platforms
+
+iqdb-20080718:
+- support GD for image loading and resizing
+  (it's the default now, edit the Makefile if you prefer ImageMagick)
+- special code for efficiently resizing high-res JPEG and PNG images
+  if using GD
+- fixed dupe finder, call iqdb find_duplicated <dbfile> [<std.dev threshold>]
+- added mkdup script to maintain filename and iqdb database and
+  generate lists of files with duplicate images
+- allow using custom routines for microtime_float, thumb_fname, make_thumb
+  and request_srv in the PHP code, if you need to do things a little, but
+  not completely, differently
+- added sample code showing how to use CurlTransfer for URL
+  transfers with status updates
+
+iqdb-20080612:
+- optimized delta_iterator to improve query speed by ~20%
+  (now as fast or even slightly faster than before)
+
+iqdb-20080611:
+- greatly reduced memory usage (and only slightly increased query
+  times) with USE_DELTA_QUEUE in the Makefile (enabled by default)
+- support for returning only results matching an AND/XOR bit mask
+  set the mask with the command "query_opt mask <and> <xor>"
+  (mask stored internally instead of the image width)
+- the rehash command in "alter" mode (e.g. when run as
+  "iqdb command ...") will update bucket sizes if they are out of
+  sync, to reduce memory usage
+- added PHP CurlTransfer class which implements the HTTP transfer
+  with regular status updates on slow or stalled transfers
+- fixed a bug that caused it to ignore width and height set
+  while adding an image, as opposed to with "set_res" later
+- several internal code cleanups and optimizations
+
+iqdb-20080417:
+- load data needed for queries into memory in readonly/simple mode
+  (can be disabled by editing the Makefile configuration)
+- removed support for multiple DBs in one file
+- added support for direct manipulation of file (adding/removing pics)
+  for faster updates
+- added support for add/remove in simple/readonly mode as well, though
+  these modifications can obviously not be saved and so need to be
+  done both in memory and the DB file
+- the "command" and "add" options now use the new alter mode, hence
+  queries are not supported (along with some other info commands)
+- corrupt database data now causes iqdb to abort with exit code 10.
+  this indicates that restarting it is useless until the DB is fixed.
+
+iqdb-20080303:
+- preliminary find_duplicates function
+- refactored web interface into frontend and XML backend
+
+iqdb-20080218:
+- first published version

@@ -1,0 +1,5 @@
+#!/bin/bash
+LOCKFILE=update.lock
+if ! ( set -o noclobber; echo "$PPID" > "$LOCKFILE" ) then
+	echo Could not obtain lock
+fi

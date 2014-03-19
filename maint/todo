@@ -1,0 +1,7 @@
+- imageMagick leaves tempfiles when input files are too big
+
+- always return exactly one line for add command, change scripts to filter it if they want
+- removing in simple mode doesn't quite work; still return in queries?
+- don't write anything in mode_alter if not modified
+- queue mode_alter writes, don't touch file until ::save is called, then do it all at once
+- instead of not ignoring MD5, change to always change MD5+tag like now, no need to check ignbase

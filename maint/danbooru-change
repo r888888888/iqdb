@@ -1,0 +1,910 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use DBI;
+use URI::Escape;
+use File::Find;
+use Compress::Zlib;
+
+# danbooru-change [-l] tag [-d] [-r] [-m] [-w<num>] mode [max]
+# tag=site mode=update/full/deleted/rebuild/fromdb/imagecheck -l no lock -r no online update -m 404=missing -d delete IDs from iqdb DB first
+
+my $nolock = shift, 1 if @ARGV and $ARGV[0] eq '-l';
+die "No lockfile!\n" unless $nolock or -e "update.lock";
+
+#system("renice 15 $$");
+my $tag = shift or die "Give server tag on command line.\n";
+my $delete_first = 0;
+$delete_first = 1 if @ARGV and $ARGV[0] eq '-d' and shift;
+my $no_online = shift, 1 if @ARGV and $ARGV[0] eq '-r';
+my $allow_missing = 0;
+$allow_missing = 1 if @ARGV and $ARGV[0] eq '-m' and shift;
+my $warnmax = 4;
+$warnmax = 0+$1 if @ARGV and $ARGV[0] =~ /-w(\d+)/ and shift;
+my $mode = "update";
+$mode = shift if @ARGV and ($ARGV[0] =~ /^[a-z]+$/);
+my $max = 0+(shift||0);
+my $cnt = 0;
+my $start_time = time;
+print "Getting no more than $max posts.\n" if $max > 0;
+my $update_cnt = 100;
+
+$SIG{__DIE__} = sub { die "$tag: @_"; };
+$SIG{__WARN__} = sub { warn "$tag: @_"; };
+
+our ($base,$iqdb_host,$user,$dbver,$pw,$apikey,$proto,$host,$table,$dbid,$db_file,%url,$def_rating,$proxy,@no_proxy,$no_compress,$limit,$referrer,$transform,$min_delay);
+our $posts_tag = "posts";
+our $post_tag = "post";
+$limit = 100;
+$dbver = 1;
+do "/home/iqdb/src/base.cfg" and -d $base and $iqdb_host or die "Can't get base settings: $!\n";
+do "/home/iqdb/src/$tag.cfg" and (defined $user and (defined $pw or defined $apikey) or %url) and $host and $table and $dbid and $db_file or die "Can't get DB settings: $!\n";
+$db_file="$base/doujin/db/iqdb/$db_file";
+die "$db_file does not exist\n" unless -e $db_file;
+chdir "$base/doujin/$tag" or die "Can't chdir: $!\n";
+$referrer = "http://$host/" unless $referrer;
+
+print "Site: $tag Mode: $mode\n";
+
+my $last_change = get_last('change');
+my $last_post = get_last('id');
+my $last_del = $mode eq 'delete' ? get_last('del') : 0;
+my $last_max = eval { get_last('max') };
+$max = $last_max if $last_max;
+
+my $last_query;
+
+my $pwfile = "$base/.dou-pw-admin";
+open my $f, "<", $pwfile or die "Can't read $pwfile: $!\n";
+my $password = <$f>;
+chomp $password;
+die "No password in $pwfile\n" unless $password;
+
+$|=1;
+open $f, ">", ".curmode" or die "Can't write .curmode: $!\n";
+print $f $mode;
+close $f;
+
+my %ids_db;
+my %ids_online;
+my %md5;
+
+my $last_reason;
+
+sub failed {
+	if (defined $last_reason) {
+		open my $f, ">", ".last_reason";
+		print $f $last_reason;
+	} else {
+		unlink ".last_reason";
+	}
+	my $failed = get_failed();
+	put_failed($failed + 1);
+	print STDERR "$tag: Failed $failed times before.\n", @_ if $failed;
+	# only die for fourth and ninth message, then again after 4 hours and then every ~24 hours
+	print STDERR @_ and exit unless $failed == 3 or $failed == 8 or $failed == 24 or ($failed & 127) == 127;
+	die @_;
+};
+
+if ($mode eq 'fromdb') {
+	print "Finding images... ";
+	find({ wanted => sub { return unless -f and m#^([-1-9a-f]{32})\.#; $md5{$1} = 1; } }, "0".."9", "a".."f");
+	print scalar keys %md5, " found.\n";
+	get_ids();
+}
+
+if ($mode eq 'rebuild') {
+	$no_online = 1;
+	$update_cnt = 1000;
+}
+
+if ($mode eq 'rollback') {
+	print "Rolling back to $last_post... ";
+	get_ids();
+	print scalar keys %ids_db, " IDs in iqdb DB file, ", scalar keys %ids_online, " IDs online.\n";
+	our @rollback = grep { $_ > $last_post } keys %ids_db;
+	delete @ids_online{@rollback};
+	print "Deleting ", scalar @rollback, " IDs.\n";
+	exit unless @rollback;
+}
+
+if ($mode eq 'imagecheck') {
+	print "Retrieving iqdb image IDs... ";
+	get_ids();
+	print scalar keys %ids_db, " IDs in iqdb DB file, ", scalar keys %ids_online, " IDs online.\n";
+}
+
+my $dbh = DBI->connect("DBI:mysql:database=sim:host=localhost", "simadmin", $password)
+	or die "Can't connect to database: $DBI::errstr\n";
+
+$dbh->do(<<EOT) or die "FAILED.\n";
+	create table if not exists $table (
+		id int not null,
+		rating char(1) character set latin1,
+		md5 binary(32) not null,
+		post blob not null,
+
+		UNIQUE INDEX(id),
+		PRIMARY KEY(id),
+		UNIQUE INDEX(md5)
+	) CHARSET=utf8;
+EOT
+	#) CHARSET=utf8 INDEX DIRECTORY='/var/lib/mysql-index/sim' DATA DIRECTORY='/var/lib/mysql-data/sim';
+
+my $req_url;
+my $ua = MyUserAgent->new;
+$ua->timeout(10);
+$ua->env_proxy;
+$ua->agent("iqdb/0.1 (+http://iqdb.org/)");
+
+$ua->proxy('http', $proxy) if $proxy;
+$ua->no_proxy(@no_proxy) if @no_proxy;
+print "Using proxy ", $ua->proxy('http'), "\n" if $ua->proxy('http');
+
+use LWP::ConnCache;
+$ua->conn_cache(LWP::ConnCache->new(total_capacity => 5));
+
+my @remove;
+my @add;
+my @insert;
+my @update;
+
+my @tofetch;
+
+my %deleted;
+
+my $sth_chk = $dbh->prepare("select rating from $table where id=?") or exit 1;
+my $sth_ins = $dbh->prepare("insert into $table (id, rating, md5, post) values (?, ?, ?, ?) on duplicate key update id=values(id),rating=values(rating),post=values(post)") or exit 1;
+my $sth_del;
+
+my %ratings = (a => 0x02, e => 0x04, q => 0x08, s => 0x10);
+
+my $warn = 0;
+my $err = 0;
+
+my $sth;
+if ($mode eq 'fromdb' or $mode eq 'rebuild') {
+	$sth = $dbh->prepare("select * from $table order by id") or exit 1;
+	$sth_del = $dbh->prepare("delete from $table where md5=?") or exit 1;
+	$sth->execute();
+} elsif ($mode eq 'delete') {
+	$sth_chk = $dbh->prepare("select id from $table where md5=?") or exit 1;
+	#$sth_del = $dbh->prepare("delete from $table where md5=?") or exit 1;
+} elsif ($mode eq 'imagecheck') {
+	$sth_del = $dbh->prepare("delete from $table where id=?") or exit 1;
+	$sth = $dbh->prepare("select id from $table") or exit 1;
+	$sth->execute();
+	while (my $id = $sth->fetchrow_array) {
+		if ($ids_db{$id} and $ids_online{$id}) {
+			$ids_db{$id} = $ids_online{$id} = 0;
+			next;
+		}
+		print "Inconsistent: DB ID $id iqdb ", 
+			exists $ids_db{$id} ? $ids_db{$id} : "missing", " online ",
+			exists $ids_online{$id} ? $ids_online{$id} : "missing", ", probably deleted, retrieval will be attempted.\n";
+
+		push @tofetch, $id;
+	}
+	print scalar @tofetch, " inconsistent IDs to retrieve.\n";
+}
+
+AGAIN:
+while(!$max or $cnt < $max) {
+	my $curid;
+	my $query;
+	my $posts;
+	if ($mode eq 'full') {
+		$query = "change:>$last_change order:change";
+	} elsif ($mode eq 'deleted') {
+		die "This should probably use status:deleted now.\n";
+		$query = "id:>$last_del order:id deleted:true";
+	} elsif ($mode eq 'delete') {
+		$query = "foo";		# only gelbooru for now
+	} elsif ($mode eq 'update') {
+		$query = "id:>$last_post order:id";
+	} elsif ($mode eq 'rollback') {
+		push @remove, sprintf "0x%x", $_ for our @rollback;
+		last;
+	} elsif ($mode eq 'fromdb' or $mode eq 'rebuild') {
+		if (@tofetch and (not %url or exists $url{$mode})) {
+			my $md5 = shift @tofetch;
+			$curid = $md5;
+			print "Trying to get MD5 $md5...\n";
+			$query = "md5:$md5";
+		} else {
+			last unless $sth;
+			my $row = $sth->fetchrow_hashref or last;
+			die "fromdb/rebuild broken, fix XML parsing!\n";
+			$posts = MyUserAgent::parse(Compress::Zlib::uncompress($row->{$post_tag}));
+			$_->{noinsert} = 1 for @$posts;
+			if ($mode eq 'rebuild') {
+				$_->{force_add} = 1 for @$posts;
+			}
+		}
+	} elsif ($mode eq 'imagecheck') {
+		if (!@tofetch) {
+			print "Checking iqdb DB IDs...\n";
+			while (my ($id, $val) = each %ids_db) {
+				next unless $val;
+				print "ID $id in iqdb DB is not in database.\n";
+				delete $ids_db{$id};
+				push @tofetch, $id;
+				push @remove, sprintf "0x%x", $id;
+			}
+		}
+		if (!@tofetch) {
+			print "Checking online DB IDs...\n";
+			while (my ($id, $val) = each %ids_online) {
+				next unless $val;
+				print "ID $id in online DB is not in database.\n";
+				delete $ids_online{$id};
+				push @tofetch, $id;
+				push @remove, sprintf "0x%x", $id;
+			}
+		}
+		if (!@tofetch) {
+			print "ID check complete.\n";
+			last;
+		}
+
+		$curid = shift @tofetch;
+		print "Trying to get ID $curid...\n";
+		$query = "id:$curid";
+	} else {
+		die "Unknown mode: $mode\n";
+	}
+	if (%url and $query) {
+		my %values = (ID => $last_post, CHANGE => $last_change, DELETE => $last_del);
+		failed "$tag: mode '$mode' has no URL\n" unless exists $url{$mode} or $mode eq 'rebuild';
+		$req_url = $url{$mode} or next;
+		$req_url =~ s/<([A-Z]+)>/exists $values{$1} or die "$1\n"; $values{$1}/eg;
+	} elsif ($query) {
+		my $login = '';
+		$login .= "&login=$user" if $user;
+		$login .= "&password_hash=$pw" if defined $pw;
+		$login .= "&api_key=" . uri_escape $apikey if defined $apikey;
+		$req_url = $dbver == 2 ? '/posts.xml' : '/post/index.xml';
+		$req_url = "$proto://$host$req_url?limit=$limit$login&tags=".uri_escape $query;
+	}
+	if ($min_delay and $last_query) {
+		my $delay = time() - $last_query;
+		if ($delay < $min_delay) {
+			$delay = $min_delay - $delay;
+			print "Sleeping $delay s ($min_delay delay)\n";
+			sleep $delay;
+		}
+	}
+	$posts = $ua->get_posts(\$req_url) if $query;
+	$last_query = time();
+	failed "$tag: $req_url\n$posts\n" unless ref $posts eq 'ARRAY';
+	print "Got ", scalar @$posts, " posts.\n" if $mode eq 'rebuild' and $query;
+	if ($mode eq 'rebuild' and @$posts == 0) {
+		print "Post $curid does not exist, removing from DB.\n";
+		$sth_del->execute($curid);
+		next;
+	} elsif ($mode eq 'imagecheck') {
+		if (@$posts == 0) {
+			print "Post $curid does not exist, removing from DB.\n";
+			$sth_del->execute($curid);
+			next;
+		}
+		die "FAILED! GOT ".(scalar @$posts)." POSTS!\n" if @$posts != 1;
+		$_->{force_update} = 1 for @$posts;
+	}
+	if (@$posts < 2) {
+		$last_max = undef;
+		print "No more posts, we're done!\n";
+		last;
+	}
+	for (@$posts) {
+		process() or $err++;
+		my $next_max = $max > -1 ? $max * 2 / 5 : 200;
+		if (time - $start_time > 60*10 and not $nolock) {
+			put_last("max", $next_max);
+			$last_reason = "Update taking too long, aborted.";
+			failed "$tag: Update taking over 10 minutes, aborting. Next time will try only $next_max\n";
+		}
+	}
+	failed "$tag: Had errors.\n" if $err;
+	failed "$tag: Had $warn warnings.\n" if $warn > $warnmax;
+
+	print "Last change ID and post ID so far: $last_change - $last_post\n" unless $mode eq 'fromdb' or $mode eq 'rebuild';
+	update() if @add >= $update_cnt or @insert >= $update_cnt;
+
+	if ($mode eq 'full' and $posts->[0]{change} == $last_change and $posts->[-1]{change} == $last_change) {
+		$last_max = undef;
+		print "No more posts (change start = change end = last change), we're done!\n";
+		last;
+	}
+}
+
+$sth = undef;
+print "Checking ", scalar keys %md5, " known MD5s...\n" if $mode eq 'fromdb';
+for (keys %md5) {
+	next unless $md5{$_};
+	print "No post for $_! " and $warn++;
+	/^(.)(.)(.)/;
+	my $file = "$1/$2/$3/$_.jpg";
+	print "But $file doesn't exist either!!\n" and next unless -f $file;
+	push @tofetch, $_;
+	print "Moving to todelete/. ";
+	rename $file, "todelete/$_.jpg" or warn "Can't move: $!\n" and next;
+	print "OK.\n";
+}
+goto AGAIN if @tofetch;
+
+update();
+failed "$tag: Had $warn warnings.\n" if $warn;
+put_failed(0);
+if (defined $last_max) {
+	print "Still not all posts, trying $last_max more next time.\n";
+	put_last("max", $last_max);
+} else {
+	unlink ".lastmax";
+}
+unlink ".last_reason";
+
+sub get_last {
+	open my $last_f, "<", ".last$_[0]" or die "Can't read .last$_[0]: $!\n";
+	$last_f = <$last_f>;
+	die "Could not get last $_[0] ID.\n" unless defined $last_f;
+	$last_f = 0 + $last_f;
+	print "Last $_[0] ID: $last_f\n";
+	return $last_f;
+}
+sub put_last {
+	print "Writing last $_[0] = $_[1]\n";
+	open my $out, ">", ".last$_[0]" or die "Can't write .last$_[0]: $!\n";
+	print $out $_[1] or die "$!\n";
+	close $out or die "$!\n";
+}
+
+sub get_failed {
+	open my $failed_f, "<", ".failed" or warn "Can't read .failed: $!\n";
+	my $failed = <$failed_f>;
+	warn "Could not get last $_[0] ID.\n" unless defined $failed;
+	$failed = 0 + $failed;
+	print "Failed count: $failed\n";
+	return $failed;
+}
+sub put_failed {
+	print "Writing failed = $_[0]\n";
+	open my $out, ">", ".failed" or die "Can't write .failed: $!\n";
+	print $out $_[0] or die "$!\n";
+	close $out or die "$!\n";
+	unlink ".curmode";
+}
+
+sub process {
+	failed "$tag: Invalid row (not a hashref): $_\n" unless ref $_ eq 'HASH';
+
+	my $quiet = $max > 200;
+
+	$transform->($_) if $transform;
+
+	$_->{status} = "active" unless exists $_->{status};
+	if ($mode eq 'delete') {
+		failed "$tag: invalid delete ID $_->{deleted}\n" unless $_->{deleted} eq 0 + $_->{deleted};
+		$last_del=0+$_->{deleted} if $_->{deleted} > $last_del;
+
+		$sth_chk->execute($_->{md5}) or die "Can't retrieve row for $_->{md5}\n";
+		my @row = $sth_chk->fetchrow_array or return 1;
+		failed "$tag: duplicate row for $_->{md5}\n" if $sth_chk->fetchrow_array;
+		$_->{id} = $row[0];
+		$_->{status} = 'deleted';
+		$_->{preview_url} = "deleted.jpg";
+		#$sth_del->execute($_->{md5});
+	}
+
+	$cnt++;
+	failed "$tag: Invalid row (no ID): @{[%$_]}\n" unless $_->{id};
+
+	my $id = $_->{id};
+	failed "$tag: Invalid ID $id: @{[%$_]}\n" unless $id eq 0 + $id;
+	$id = 0 + $id;
+
+	my $change = $_->{change};
+	$change = undef if defined $change and $change eq '';
+	if (defined $change) {
+		warn "Invalid change ID $change: @{[%$_]}\n" and $warn++ unless $change eq 0 + $change;
+		$last_change=0+$change if $change > $last_change;
+	}
+	$last_post=0+$id if $id > $last_post;
+	$last_del=0+$id if $id > $last_del and $mode ne 'delete';
+
+	$_->{preview_url} ||= "deleted.jpg" if $_->{status} eq "disabled";
+	failed "$tag: $id: Invalid row (no URL): @{[%$_]}\n" unless $_->{preview_url};
+	my $url = $_->{preview_url};
+
+	my $md5 = lc $_->{md5};
+	$last_reason = "Post $id: Invalid MD5: '$md5'" and
+	failed "$tag: Post $id: Invalid md5: $md5\n" unless length $md5 =~ /^[0-9a-f]{32}$/;
+
+	my ($file,$suf) = ($md5, substr $url, rindex $url, ".");
+	$suf = ".jpg" unless $suf =~ /^\.[a-z]+$/;
+	$suf = ".jpg" if $suf eq '.jpeg';
+	$file =~ /^(.)(.)(.)/;
+	$file = "$1/$2/$3/$file.jpg";
+	print "$id: $url -> $file:" unless $quiet;
+	print "\r$id \x1b[K" if $quiet;
+
+	my $width = $_->{preview_width};
+	my $height = $_->{preview_height};
+	$width = $_->{actual_preview_width} if $_->{actual_preview_width};
+	$height = $_->{actual_preview_height} if $_->{actual_preview_height};
+	my $resize = 0;
+	$resize = 1 if $width and $width > 150;
+	$resize = 1 if $height and $height > 150;
+
+	if ($_->{status} eq 'deleted' or $_->{status} eq 'disabled') {
+		print "DELETED" unless $quiet;
+		print "\n" and return 1 if $mode eq 'rebuild';
+		push @remove, sprintf "0x%x", $id if $mode ne 'fromdb' or $ids_db{$id} or $ids_online{$id};
+		$deleted{$id} = 1;
+		#if (-e $file) {
+		#	print " moving to deleted/";
+		#	rename $file, "deleted/$md5.jpg" or die "\n$tag: Can't move $file to deleted/: $!\n";
+		#}
+		$file = "";
+
+	} elsif ($url =~ m#/(default|download|deleted|download-preview)\.png$#) {	## deconfuse vim
+		print "SKIPPED" unless $quiet;
+		print "\n" and return 1 if $mode eq 'rebuild';
+		$file = "";
+
+	} elsif (-e $file and not $_->{force_update}) {
+		print "Exists" unless $quiet;
+		print " empty" and $file = "" unless -s $file;
+
+	} elsif ($suf ne '.jpg' and $suf ne '.gif' and $suf ne '.png' and $suf ne '.bmp') {
+		print STDERR "$tag: $id: $url -> $file: ignored\n" and $quiet = 0 if $quiet;
+		print "SKIPPED: Suffix `$suf' not .jpg/bmp/gif/png!" unless $quiet;
+		print "\n" and return 1 if $mode eq 'rebuild';
+		$file = "";
+
+	} else {
+		print "$url -> $file:" and $quiet = 0 if $quiet;
+		my $alt_url = $_->{sample_url};
+		$alt_url = $_->{file_url} unless $alt_url;
+		retrieve($url, $alt_url, $md5, $file, $id, $resize) or $file = undef;
+	}
+
+	if ($mode eq 'fromdb') {
+		if (not exists $md5{$md5}) {
+			print "No file for $md5!\n" if $file and not -e $file;
+			$md5{$md5} = 0;
+		} elsif ($md5{$md5}) {
+			$md5{$md5} = 0;
+		} else {
+			warn "Duplicate MD5 in posts table: $md5!\n" and $warn++;
+		}
+	} elsif ($mode eq 'rebuild' and $_->{force_add}) {
+		if (not $file or not -e $file) {
+			print " No file, fetching.\n";
+			push @tofetch, $md5;
+			return 1;
+		}
+	}
+
+	$_->{rating} = $def_rating if $def_rating and (not defined $_->{rating} or $_->{rating} eq '');
+	my $rating = $ratings{$_->{rating}};
+
+	if (!$_->{rating} && !$width && !$height) {
+		print "no rating, no size: SKIPPED" unless $quiet;
+		print "\n" and return 1 if $mode eq 'rebuild';
+		$file = "";
+	} elsif (!$rating) {
+		$last_reason = "Post $id: unknown rating '$_->{rating}'";
+		failed "$tag: $id: Unknown rating '$_->{rating}'\n";
+	}
+
+	if ($_->{force_update} and not $file) {
+		print " No file, removing from DB.";
+		$sth_del->execute($id);
+	} else {
+		eval { push @insert,[$id,$_->{rating},$md5,Compress::Zlib::compress($_->{raw}, 9)] unless $_->{noinsert}; };
+		if ($@) {
+			use Encode::Encoding;
+			print STDERR "Compress failed, trying to fix UTF-8. ";
+			$_->{raw} = Encode::encode("utf8", $_->{raw}, Encode::FB_XMLCREF);
+			push @insert,[$id,$_->{rating},$md5,Compress::Zlib::compress($_->{raw}, 9)] unless $_->{noinsert};
+		}
+	}
+	# BROKEN: $sth_chk->execute(...) returns TRUE, not number of rows
+	my $rows = $_->{force_update} ? 0 : $_->{force_add} ? -1 : $sth_chk->execute($id);
+	if ($rows == 1) {
+		my @row = $sth_chk->fetchrow_array or exit 1;
+		$row[0] ||= "";
+		if ($file and $_->{rating} ne $row[0]) {
+			print "\n$id: rating $row[0] -> $_->{rating} = $rating";
+			push @update, [$id, sprintf "0x%x 1 $rating", $id];
+		}
+		$file = "";
+	} elsif ($rows != 0 and $rows != -1) {
+		failed "$tag: Invalid row count for $id: $rows\n";
+	}
+	if ($file) {
+		push @add, [$id, sprintf "0x%x 1 $rating:$base/doujin/$tag/$file", $id];
+	} else {
+		print " not added";
+	}
+	print " OK\n" unless $quiet;
+	return defined $file;
+}
+
+sub retrieve {
+	my ($url, $alt_url, $md5, $file, $id, $resize) = @_;
+	my $tmpfile = "new/$md5.jpg";
+
+	# make relative uri absolute
+	my $thu_uri = URI->new($url);
+	unless (defined $thu_uri->scheme) {
+		my $base_uri = URI->new($req_url);
+		$base_uri->path("/");
+		$thu_uri = URI->new_abs($url,$base_uri);
+		print " Relative URL.\nUsing $thu_uri instead: ";
+		$url = $thu_uri;
+	}
+
+	unlink $tmpfile;
+	my $res = $ua->mirror($url, $tmpfile);
+	if (($res->code == 404 or -z $tmpfile) and $alt_url) {
+		$resize = 1;
+		$url = $alt_url;
+		print " 404.\nTrying alternate URL $url: ";
+		unlink $tmpfile;
+		$res = $ua->mirror($url, $tmpfile);
+	}
+	if (($res->code == 404 or -z $tmpfile) and $allow_missing) {
+		print " 404. Using Missing.png. ";
+		link "../Missing.png", $file and return 1;
+		print "$! ";
+	}
+	if ($res->code == 500) {
+		print "Failed (".$res->status_line.")! Trying again. ";
+		if ($res->status_line =~ /connect: Operation not permitted/) {
+			print "Waiting 3 secs. ";
+			sleep(3);
+		}
+		$res = $ua->mirror($url, $tmpfile);
+	}
+	if ($res->code == 403) {
+		print "Skipped (403)\n";
+		print STDERR "$tag: $url ($id -> $md5): ".$res->status_line."\n";
+		$warn++;
+		return;
+	}
+	#if ($res->code == 404) {
+	#	print "Skipped (404)\n";
+	#	print STDERR "$tag: $url ($id -> $md5): ".$res->status_line."\n";
+	#	#$warn++;
+	#	return 1;
+	#}
+	if ($res->code >= 500) {
+		print "Failed (".$res->status_line.")! Aborting.\n";
+		$last_reason = "Thumbnail $id: " .$res->status_line;
+		failed "$tag: $url: ".$res->status_line."\n";
+	}
+	if (!$res->is_success and $res->code != 304) {
+		print "FAILED (".$res->code."). ";
+		print STDERR "$tag: $url ($id -> $md5): ".$res->status_line."\n";
+		$last_reason = "Thumbnail $id: " .$res->status_line;
+		return;
+	}
+
+	open my $f, "<", $tmpfile or die "Can't open $tmpfile: $!\n";
+	sysread $f, my $fhdr, 10 or die "Can't read $tmpfile: $!\n";
+	use bytes;
+	if (substr($fhdr, 0, 4) eq 'GIF8' or substr($fhdr, 0, 8) eq "\x89PNG\x0d\x0a\x1a\x0a") {
+		print "GIF/PNG! ", -s $tmpfile, " -> ";
+		my $tmp2 = "$tmpfile.jpg";
+		if (0 != system "to-jpeg", $tmpfile, $tmp2, 150, 80) {
+			$last_reason = "Thumbnail $id: not image file";
+			failed "$tag: $id: Cannot convert to jpeg: $? $!\n";
+		}
+		unlink $tmpfile;
+		$tmpfile = $tmp2;
+		open $f, "<", $tmpfile or die "Can't read converted $tmpfile: $!\n";
+		sysread $f, $fhdr, 10 or die "Can't read converted $tmpfile: $!\n";
+	}
+	if ($resize) {
+		print ">150 -> ";
+		my $tmp2 = "$tmpfile-150.jpg";
+		if (0 != system "to-jpeg", $tmpfile, $tmp2, 150, 80) {
+			if ($? == -1 || $? & 127 || ($? >> 8) != 64) {
+				$last_reason = "Thumbnail $id: can't resize (not image file)";
+				failed "$tag: $id: Cannot resize: $? $!\n";
+			}
+			print "Skipped (unsupported image format)\n";
+			print STDERR "$tag: $url ($id -> $md5): unsupported image format\n";
+			system "to-jpeg", "../Missing.png", $tmp2, 150, 80;
+		}
+		unlink $tmpfile;
+		$tmpfile = $tmp2;
+		open $f, "<", $tmpfile or die "Can't read converted $tmpfile: $!\n";
+		sysread $f, $fhdr, 10 or die "Can't read converted $tmpfile: $!\n";
+	}
+	my $jpeghdr = "\xFF\xD8\xFF"; #\xE0\x00\x10\x4A\x46\x49\x46";
+	if (substr($fhdr, 0, 3) ne $jpeghdr) {
+		return if $mode eq 'rebuild';
+		sysread $f, $fhdr, 128*1024, -1 or die "Can't read $tmpfile: $!\n";
+		if (-1 == index $fhdr, "No such file or directory: ") {
+			if ($url =~ /\.bmp$/) {
+				print "Skipped (BMP)";
+				return;
+			}
+			$fhdr = join " ", map { sprintf "%02x", ord $_ } split //, $fhdr, length $jpeghdr;
+			$jpeghdr = join " ", map { sprintf "%02x", ord $_ } split //, $jpeghdr;
+			$last_reason = "Thumbnail $id: not image file";
+			failed "$tag: $id: No JPEG header:\nGot= $fhdr\nWant=$jpeghdr\n";
+		}
+		print "Failed (No such file or directory)\n";
+		print STDERR "$tag: $url ($id -> $md5): No such file or directory\n";
+		$warn++;
+		unlink $tmpfile;
+		return 1;
+	}
+	print -s $tmpfile;
+	rename $tmpfile, $file or die "Can't move $tmpfile to $file: $!\n";
+	#print -s $file; -- not always present right away on NFS
+	return 1;
+}
+
+sub update {
+	my @toadd = @add;
+	my @toremove = @remove;
+	my @toupdate = @update;
+	if (@add or @remove or @update) {
+		if (!update_iqdb()) {
+			print "iqdb update failed, trying again after 10 seconds\n";
+			@add = @toadd;
+			@remove = @toremove;
+			@update = @toupdate;
+			sleep 10;
+			if (!update_iqdb()) {
+				failed "$tag: iqdb update failed";
+			}
+		}
+	}
+	update_db() if @insert;
+	print "Last committed change/post: $last_change $last_post\n";
+	
+	if ($mode eq 'full') {
+		put_last("change", $last_change);
+	} elsif ($mode eq 'update') {
+		put_last("id", $last_post);
+	} elsif ($mode eq 'delete') {
+		put_last("del", $last_del);
+	}
+}
+
+sub update_iqdb {
+	print "Updating DB: removing ", scalar @remove, " images, adding ", scalar @add, " and updating ", scalar @update, " images.\n";
+
+	$SIG{PIPE} = 'IGNORE';
+	$|=1;
+	open my $olderr, ">&STDERR" or die "Can't dup STDERR: $!\n";
+	open STDERR, ">&STDOUT" or die "Can't redirect STDERR to STDOUT: $!\n";
+	open my $iqdb, "|$base/bin/iqdb command $db_file 2>&1|perl -ple '\$err=1 if /^3(?!01 invalid_id)/; END { exit \$err; }'" or die "Can't run iqdb: $!\n";
+	open STDERR, ">&", $olderr or die "Can't restore STDERR: $!\n";
+	select $iqdb; $|=1; select STDOUT;
+	###system "sync";
+	#print scalar keys %deleted, " IDs deleted: ", join " ", keys %deleted, "\n";
+
+	while (@add or @remove or @update) {
+		my $nc;
+		unless ($no_online) {
+			print "Opening connection for ", @add+@remove+@update, " commands...\n";
+			open $nc, "| nc $iqdb_host 5588 2>&1|perl -ple '\$err=1 if /^3(?!01 invalid_id)/; END { exit \$err; }'" or die "Can't start nc: $!\n";
+			select $nc; $|=1; select STDOUT;
+		}
+
+		# Only add 16 images per connection, to let other clients query it too in-between.
+		my $added = 0;
+		while ($added < 16 and (@add or @remove or @update)) {
+			my $cmd;
+			if (@remove) {
+				$cmd = shift @remove;
+				print "remove X $cmd\n";
+				print $nc "remove $dbid $cmd\n" unless $no_online;
+				print $iqdb "remove 0 $cmd\n";
+			} elsif (@add) {
+				$cmd = shift @add;
+				if ($deleted{$cmd->[0]}) {
+					print "NOT ADDING, REMOVED LATER: @$cmd\n";
+					$warn++;
+					next;
+				}
+				$cmd = $cmd->[1];
+				if ($delete_first) {
+					print "remove X $cmd\n";
+					print $nc "remove $dbid $cmd\n" unless $no_online;
+					print $iqdb "remove 0 $cmd\n";
+				}
+				print "add X $cmd\n";
+				print $nc "add $dbid $cmd\n" unless $no_online;
+				print $iqdb "add 0 $cmd\n";
+				$added++;
+			} else {
+				$cmd = shift @update;
+				if ($deleted{$cmd->[0]}) {
+					print "NOT UPDATING, REMOVED LATER: @$cmd\n";
+					$warn++;
+					next;
+				}
+				$cmd = $cmd->[1];
+				print "set_res X $cmd\n";
+				print $nc "set_res $dbid $cmd\n" unless $no_online;
+				print $iqdb "set_res 0 $cmd\n";
+			}
+		}
+		unless ($no_online) {
+			print $nc "done now\n";
+			if (!close $nc or $?) {
+				print STDERR "online iqdb failed\n";
+				print $iqdb "done now\n" and return 0; # if $?; #die "Online failed!\n" if $?;
+			}
+		}
+	}
+	print $iqdb "quit now\n";
+	if (!close $iqdb or $?) {
+		print STDERR "local iqdb failed\n";
+		return 0; # die "File failed!\n";
+	}
+	return 1;
+}
+
+sub update_db {
+	print "Updating DB, ", scalar @insert, " statements... ";
+	$sth_ins->execute(@$_) or die "insert failed\n" for @insert;
+	@insert = ();
+	print "OK.\n";
+}
+
+sub get_ids {
+	print "Retrieving DB ids... ";
+	open my $iqdb, "-|", "$base/bin/iqdb", "list", $db_file or die "Can't run iqdb: $!\n";
+	while (<$iqdb>) {
+		chomp;
+		$ids_db{hex $_} = 1;
+	}
+	print scalar keys %ids_db, " ids.\n";
+	return if $no_online;
+
+	print "Retrieving online ids... ";
+	open my $nc, "-|", "/bin/echo -e 'list $dbid\ndone now\n'|nc -q 10 $iqdb_host 5588 " or die "Can't start nc: $!\n";
+	while (<$nc>) {
+		chomp;
+		/^000 / and next;
+		/^100 ([0-9a-f]+)$/ or print "Unknown response: $_\n" and next;
+		$ids_online{hex $1} = 1;
+	}
+	print scalar keys %ids_online, " ids.\n";
+}
+
+package ErrorResponse;
+sub new {
+	my $class = shift;
+	my $self = { status_line => "@_" };
+	bless $self, $class;
+	return $self;
+}
+sub code {
+	return 500;
+}
+sub is_success {
+	return 0;
+}
+sub status_line {
+	my $self = shift;
+	return $self->{status_line};
+}
+
+package MyUserAgent;
+use base qw(LWP::UserAgent);
+use XML::Simple qw(:strict);
+use Encode::Encoding qw(decode);
+sub prepare_request {
+	my $self = shift;
+	my $req = $self->SUPER::prepare_request(shift);
+	$req->header(Referer => $referrer);
+	return $req;
+}
+sub mirror {
+	my $self = shift;
+	my $res = eval { $self->SUPER::mirror(@_) };
+	return $@ ? ErrorResponse->new("$@") : $res;
+}
+sub get {
+	my $self = shift;
+	my $res = eval { $self->SUPER::get(@_) };
+	return $@ ? ErrorResponse->new("$@") : $res;
+}
+sub get_posts {
+	my ($self,$url_ref) = @_;
+	$self->default_header("Accept-Encoding" => "gzip, deflate") unless $no_compress;
+	my $res = $self->get($$url_ref);
+	$self->default_headers->remove_header("Accept-Encoding");
+	my $try = 0;
+	while ($res->status_line =~ /timeout/) {
+		$try++;
+		last if $try > 2;
+		sleep (2 << $try);
+		print STDERR "$tag: ", $res->status_line, ", trying again.\n";
+		$res = $self->get($$url_ref);
+	}
+	$$url_ref =~ s/(password_hash=)[^&]*/$1(hidden)/;
+	my $url = $$url_ref;
+	if (!$res->is_success) {
+		$last_reason = "API query failed: ".$res->status_line;
+		::failed "$tag: Could not get xml response: ".$res->status_line.".\nURL was: $url\n";
+	}
+	open my $xml, ">", "$base/src/last.zxml" or die "Can't write last.zxml: $!\n"; print $xml $res->content; close $xml;
+
+	my $decoded = $res->decoded_content();
+	if (!$decoded) {
+		$last_reason = "API query returned invalid XML";
+		::failed "$tag: Could not decode content: $@\nURL was: $url\nUndecoded length is ".length $res->content,"\n";
+	}
+
+	my $err = "No XML header: ".substr($decoded, 0, 40);
+	if ($decoded =~ /^\s*<\?xml[^>]*>\s*<([a-z]+)[^>]*>\s*/i) {
+		$err = "Root tag is '$1' not '$posts_tag'\n" and last unless $1 eq $posts_tag;
+
+		return parse($decoded);
+	}
+
+	if ($decoded =~ /^<html>.*maintenance/ims) {
+		print STDERR "$tag: maintenance\n";
+		return [];
+	}
+
+	open my $dump, ">", "$base/src/last.xml";
+	print $dump $decoded;
+	close $dump;
+	$last_reason = "XML parsing failed";
+	::failed "$tag: XML parsing failed: $err\n";
+}
+
+sub parse {
+	my $xml = eval { XML::Simple::XMLin($_[0], KeyAttr => [], KeepRoot => 1, ForceArray => [ $post_tag ]); };
+	$xml = eval { 
+		print STDERR "XML decode failed, trying to fix UTF-8. "; 
+		$_ = Encode::encode("utf8", $_[0], Encode::FB_XMLCREF);
+		XML::Simple::XMLin($_[0], KeyAttr => [], KeepRoot => 1, ForceArray => [ $post_tag ]);
+	} if $@;
+	$last_reason = "Could not parse XML" if $@;
+	return "XML error: $@" if $@;
+	#print "No posts\n" and
+	#return [] if $xml->{$posts_tag} and exists $xml->{$posts_tag}{count} and $xml->{$posts_tag}{count} eq '0';
+	my @posts = eval { @{XML::Simple::XMLin($_[0], KeyAttr => [], ForceArray => [ $post_tag ])->{$post_tag}}; };
+	for my $post (@posts) {
+		# Remove sub-tags embedded in the <post> tag
+		for my $key (keys %$post) {
+			#print 'Removing ', ref $post->{$key}, " $key\n" and
+			delete $post->{$key} if ref $post->{$key};
+		}
+
+		# Do a round-trip XML-encoding-decoding to see if all attributes survive intact
+		my $raw = eval { XML::Simple::XMLout({post => [$post]}, KeyAttr => [], KeepRoot => 1, NumericEscape => 2); };
+		return "Post $post->{id} XML re-encode error: $@" if $@;
+		my $raw_dec = eval { XML::Simple::XMLin($raw, KeyAttr => [], ForceArray => [ $post_tag ]); };
+		return "Post $post->{id} XML re-decode error: $@" if $@;
+		for my $key (keys %$post) {
+			# normalize whitespace
+			my $post_val = $post->{$key};
+			$post_val =~ s/\s+/ /g;
+			$raw_dec->{$key} =~ s/\s+/ /g;
+			die "XML attribute $key parsing failed\npost=".$post_val."; raw_dec=".$raw_dec->{$key}."\n"
+				unless $raw_dec->{$key} eq $post_val;
+			delete $raw_dec->{$key};
+		}
+		die "XML attributes: " . join("; ", keys %$raw_dec) . " not in re-encoded form\n" if %$raw_dec;
+
+		# So we can be sure that $raw is an accurate representation of the <post> tag of this post.
+		$post->{raw} = $raw;
+	}
+	return \@posts;
+}

@@ -1,0 +1,14 @@
+#!/bin/bash
+
+exec 2> /dev/null
+
+cd ~/doujin/
+for site in danbooru/a moeimouto/a konachan/a */todelete; do
+	cd ~/doujin/$site/..
+	echo -e `date` $PWD '\t' `df -h /home/ssd|grep vdc1`
+	find ? -links 1 -mtime +1|while read f; do
+		#echo -n "$f: "
+		ln -T $f ~/doujin/.common/$f || ln -fT ~/doujin/.common/$f $f
+		# || echo "FAILED"
+	done;
+done;
