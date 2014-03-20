@@ -46,8 +46,6 @@ extern int debug_level;
 
 namespace imgdb {
 
-typedef unsigned int uint;
-
 // Globals
 //keywordsMapType globalKwdsMap;
 Score weights[2][6][3];

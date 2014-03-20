@@ -65,6 +65,8 @@ different but the majority of the actual code is the same for both types.
 
 namespace imgdb {
 
+typedef unsigned int uint;
+
 // Weights for the Haar coefficients.
 // Straight from the referenced paper:
 const float weightsf[2][6][3]={

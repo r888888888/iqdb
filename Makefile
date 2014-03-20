@@ -2,6 +2,7 @@
 #----------------------------
 
 # Any extra options you need
+CFLAGS=-I/usr/local/Cellar/libpng12/1.2.50/include -L/usr/local/Cellar/libpng12/1.2.50/lib
 EXTRADEFS=
 
 # Graphics library to use, can be GD or ImageMagick.
