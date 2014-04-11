@@ -32,11 +32,8 @@
 #include <map>
 #include <stdexcept>
 #include <vector>
-
-// STL TR1
-#ifndef NO_TR1
-#include <tr1/unordered_map>
-#endif
+#include <unordered_map>
+#include <string>
 
 // Haar transform defines
 #include "haar.h"
@@ -204,7 +201,7 @@ typedef Idx sig_t[NUM_COEFS];
 
 #ifndef NO_TR1
 template<typename T>
-class imageIdMap : public std::tr1::unordered_map<imageId, T> {
+class imageIdMap : public std::unordered_map<imageId, T> {
 };
 #else
 template<typename T>

@@ -3,6 +3,12 @@
 
 # Any extra options you need
 CFLAGS=-I/usr/local/Cellar/libpng12/1.2.50/include -L/usr/local/Cellar/libpng12/1.2.50/lib
+CC=clang
+
+ifneq (${CC},clang)
+CFLAGS+=-fpeel-loops
+endif
+
 EXTRADEFS=
 
 # Graphics library to use, can be GD or ImageMagick.
@@ -26,10 +32,6 @@ override DEFS+=-DNO_SUPPORT_OLD_VER
 # Enable a significantly less memory intensive but slightly slower
 # method of storing the image index internally (in simple mode).
 override DEFS+=-DUSE_DELTA_QUEUE
-
-# Disable use of std::tr1::unordered_map if your compiler/C++ library
-# is old and doesn't have it. This will make many things slower.
-# override DEFS+=-DNO_TR1
 
 # This may help or hurt performance. Try it and see for yourself.
 override DEFS+=-fomit-frame-pointer
@@ -84,11 +86,13 @@ test-resizer : test-resizer.o resizer.o debug.o
 	g++ -o $@ $^ ${CFLAGS} ${LDFLAGS} -g -lgd -ljpeg -lpng ${DEFS} ${EXTRADEFS} `gdlib-config --ldflags`
 
 %.o : %.cpp
-	g++ -c -o $@ $< -O2 -fpeel-loops ${CFLAGS} -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
+	g++ -c -o $@ $< -O2 ${CFLAGS} -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
 
 %.le.o : %.cpp
-	g++ -c -o $@ $< -O2 -fpeel-loops ${CFLAGS} -DCONV_LE -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
+	g++ -c -o $@ $< -O2 ${CFLAGS} -DCONV_LE -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
 
 %.S:	.ALWAYS
-	g++ -S -o $@ $*.cpp -O2 -fpeel-loops ${CFLAGS} -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
+	g++ -S -o $@ $*.cpp -O2 ${CFLAGS} -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
 
+clean:
+	rm -f *.o iqdb

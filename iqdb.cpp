@@ -18,9 +18,9 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 \**************************************************************************/
 
-#include <math.h>
-#include <stdio.h>
-#include <stdarg.h>
+//#include <math.h>
+//#include <stdio.h>
+//#include <stdarg.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 
@@ -41,6 +41,10 @@
 #include <algorithm>
 #include <list>
 #include <vector>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <cmath>
 
 #include "auto_clean.h"
 #define DEBUG_IQDB

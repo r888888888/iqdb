@@ -124,7 +124,6 @@ int tempfile() {
 template<bool is_simple>
 int imageIdIndex_list<is_simple, false>::m_fd = -1;
 
-template<>
 template<bool is_simple>
 void imageIdIndex_list<is_simple, false>::resize(size_t s) {
 	if (!is_simple) s = (s + pageImgMask) & ~pageImgMask;
@@ -1674,7 +1673,7 @@ stats_t dbSpaceImpl<is_simple>::getCoeffStats() {
 	ret.reserve(imgbuckets.count());
 
 #ifdef DEBUG_STATS
-	typedef std::tr1::unordered_map<int, size_t> deltas_t;
+	typedef std::unordered_map<int, size_t> deltas_t;
 	deltas_t deltas;
 	size_t total = 0, b4 = 0, b70 = 0, b16k = 0, a16k = 0, b255 = 0;
 #endif

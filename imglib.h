@@ -257,7 +257,6 @@ protected:
 	container m_base;
 };
 
-template<>
 template<bool is_simple>
 class imageIdIndex_list<is_simple, false> {
 public:
@@ -356,15 +355,13 @@ inline Score get_aspect(int width, int height) { return 0; }
 
 template<bool is_simple> class sigMap;
 
-template<>
-class sigMap<false> : public imageIdMap<SigStruct*> {
+template<> class sigMap<false> : public imageIdMap<SigStruct*> {
 public:
 	void add_sig(imageId id, SigStruct* sig) { (*this)[id] = sig; }
 	void add_index(imageId id, size_t index) { throw usage_error("Only valid in read-only mode."); }
 };
 
-template<>
-class sigMap<true> : public imageIdMap<size_t> {
+template<> class sigMap<true> : public imageIdMap<size_t> {
 public:
 	void add_sig(imageId id, SigStruct* sig) { throw usage_error("Not valid in read-only mode."); }
 	void add_index(imageId id, size_t index) { (*this)[id] = index; }
@@ -374,8 +371,7 @@ template<bool is_simple>
 struct index_iterator;
 
 // In normal mode, we have image data in the sigMap, so iterate over that.
-template<>
-struct index_iterator<false> : public sigMap<false>::iterator {
+template<> struct index_iterator<false> : public sigMap<false>::iterator {
 	typedef sigMap<false>::iterator base_type;
 	index_iterator(const base_type& itr, dbSpaceImpl<false>& db) : base_type(itr) { }
 
@@ -394,8 +390,7 @@ struct index_iterator<false> : public sigMap<false>::iterator {
 // In simple mode, we have only the image_info data available, so iterate over that.
 // In read-only mode, we additionally have the index into the image_info array in a sigMap.
 // Using functions that rely on this in simple mode will throw a usage_error.
-template<>
-struct index_iterator<true> : public image_info_list::iterator {
+template<> struct index_iterator<true> : public image_info_list::iterator {
 	typedef image_info_list::iterator base_type;
 	index_iterator(const base_type& itr, dbSpaceImpl<true>& db) : base_type(itr), m_db(db) { }
 	index_iterator(const sigMap<true>::iterator& itr, dbSpaceImpl<true>& db);	// implemented below
@@ -419,7 +414,6 @@ template<bool is_simple, typename B>
 struct id_index_iterator;
 
 // In normal mode, the imageIdIndex_map stores image IDs. Get the index from the dbSpace's linked SigStruct.
-template<>
 template<typename B>
 struct id_index_iterator<false,B> : public B {
 	typedef B base_type;
@@ -430,7 +424,6 @@ struct id_index_iterator<false,B> : public B {
 };
 
 // In read-only/simple mode, the imageIdIndex_map stores the index directly.
-template<>
 template<typename B>
 struct id_index_iterator<true,B> : public B {
 	typedef B base_type;

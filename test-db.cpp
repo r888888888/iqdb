@@ -89,7 +89,7 @@ imgdb::ImgData* make_data(int id) {
 
 void check(imgdb::dbSpace* db, int range, const deleted_t& removed) {
 	int error = 0;
-	typedef std::tr1::unordered_map<imgdb::imageId, int> id_map;
+	typedef std::unordered_map<imgdb::imageId, int> id_map;
 	id_map ids;
 	for (int i = 1; i <= range; i++)
 		ids[i] = 0;
