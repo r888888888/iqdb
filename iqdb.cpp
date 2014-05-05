@@ -458,7 +458,7 @@ void sim(const char* fn, imgdb::imageId id, int numres) {
 		printf("%08"FMT_imageId" %lf %d %d\n", sim[i].id, (double)sim[i].score / imgdb::ScoreMax, sim[i].width, sim[i].height);
 }
 
-enum event_t { DO_QUITANDSAVE };
+enum event_t { DO_QUITANDSAVE=0, DO_ERROR, DO_DONE };
 
 #define DB dbs.at(dbid)
 
@@ -480,7 +480,7 @@ std::pair<char*, size_t> read_blob(const char* size_arg, FILE* rd) {
 	return std::make_pair(blob, blob_size);
 }
 
-void do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
+event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 	struct customOpt : public imgdb::queryOpt {
 		customOpt() : mindev(0) {}
 
@@ -496,11 +496,11 @@ void do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 			if (feof(rd)) {
 				fprintf(wr, "100 EOF detected.\n");
 				DEBUG(warnings)("End of input\n");
-				return;
+				return DO_ERROR;
 			} else if (ferror(rd)) {
 				fprintf(wr, "300 File error %s\n", strerror(errno));
 				DEBUG(errors)("File error %s\n", strerror(errno));
-				return;
+				return DO_ERROR;
 			} else {
 				fprintf(wr, "300 Unknown file error.\n");
 				DEBUG(warnings)("Unknown file error.\n");
@@ -529,10 +529,10 @@ void do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 			if (!allow_maint) throw imgdb::usage_error("Not authorized");
 			fprintf(wr, "100 Done.\n");
 			fflush(wr);
-			throw DO_QUITANDSAVE;
+			return DO_QUITANDSAVE;
 
 		} else if (!strcmp(command, "done")) {
-			return;
+			return DO_DONE;
 
 		} else if (!strcmp(command, "list")) {
 			int dbid;
@@ -782,16 +782,15 @@ void do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 		fprintf(wr, "301 %s %s\n", err.type(), err.what());
 		fflush(wr);
 	}
+
+	return DO_DONE;
 }
 
 void command(int numfiles, char** files) {
 	dbSpaceAutoMap dbs(numfiles, imgdb::dbSpace::mode_alter, files);
 
-	try {
-		do_commands(stdin, stdout, dbs, true);
-
-	} catch (const event_t& event) {
-		if (event != DO_QUITANDSAVE) return;
+	int ret = do_commands(stdin, stdout, dbs, true);
+	if (ret == DO_QUITANDSAVE) {
 		for (int dbid = 0; dbid < numfiles; dbid++)
 			DB.save();
 	}
@@ -977,10 +976,10 @@ void server(const char* hostport, int numfiles, char** files, bool listen2) {
 		socket_stream stream(fd);
 
 		try {
-			do_commands(stream.rd, stream.wr, dbs, is_high);
-
-		} catch (const event_t& event) {
-			if (event == DO_QUITANDSAVE) return;
+			int ret = do_commands(stream.rd, stream.wr, dbs, is_high);
+			if (ret == DO_QUITANDSAVE) {
+				return;
+			}
 
 		// Unhandled imgdb::base_error means it was fatal or completely unknown.
 		} catch (const imgdb::base_error& err) {

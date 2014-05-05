@@ -418,7 +418,7 @@ void AutoPNG::read_info() {
 }
 
 png_color_16 AutoPNG::white_background
-	= { index: 0, red: ~png_uint_16(), green: ~png_uint_16(), blue: ~png_uint_16(), gray: ~png_uint_16() };
+	= { .index = 0, .red = ~png_uint_16(), .green = ~png_uint_16(), .blue = ~png_uint_16(), .gray = ~png_uint_16() };
 
 void AutoPNG::setup_trans() {
 	png_set_palette_to_rgb(png);

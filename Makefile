@@ -2,7 +2,8 @@
 #----------------------------
 
 # Any extra options you need
-CFLAGS=-I/usr/local/Cellar/libpng12/1.2.50/include -L/usr/local/Cellar/libpng12/1.2.50/lib
+CFLAGS=-I/usr/local/Cellar/libpng12/1.2.50/include 
+LDFLAGS=-L/usr/local/Cellar/libpng12/1.2.50/lib
 CC=clang
 
 ifneq (${CC},clang)
