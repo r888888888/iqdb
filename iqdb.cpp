@@ -677,7 +677,7 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 		} else if (!strcmp(command, "remove")) {
 			imgdb::imageId id;
 			int dbid;
-			if (sscanf(arg, "%d %"FMT_imageId, &dbid, &id) != 2)
+			if (sscanf(arg, "%d %" FMT_imageId, &dbid, &id) != 2)
 				throw imgdb::param_error("Format: remove <dbid> <imgid>");
 
 			fprintf(wr, "100 Removing %d:%08" FMT_imageId "...\n", dbid, id);
