@@ -417,8 +417,13 @@ void AutoPNG::read_info() {
 	png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, &interlace_method, NULL, NULL);
 }
 
-png_color_16 AutoPNG::white_background
-	= { .index = 0, .red = ~png_uint_16(), .green = ~png_uint_16(), .blue = ~png_uint_16(), .gray = ~png_uint_16() };
+png_color_16 AutoPNG::white_background = { 
+	.index = 0, 
+	.red = static_cast<png_uint_16>(~png_uint_16()),
+	.green = static_cast<png_uint_16>(~png_uint_16()), 
+	.blue = static_cast<png_uint_16>(~png_uint_16()), 
+	.gray = static_cast<png_uint_16>(~png_uint_16())
+};
 
 void AutoPNG::setup_trans() {
 	png_set_palette_to_rgb(png);
