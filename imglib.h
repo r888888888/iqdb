@@ -355,13 +355,15 @@ inline Score get_aspect(int width, int height) { return 0; }
 
 template<bool is_simple> class sigMap;
 
-template<> class sigMap<false> : public imageIdMap<SigStruct*> {
+template<>
+class sigMap<false> : public imageIdMap<SigStruct*> {
 public:
 	void add_sig(imageId id, SigStruct* sig) { (*this)[id] = sig; }
 	void add_index(imageId id, size_t index) { throw usage_error("Only valid in read-only mode."); }
 };
 
-template<> class sigMap<true> : public imageIdMap<size_t> {
+template<>
+class sigMap<true> : public imageIdMap<size_t> {
 public:
 	void add_sig(imageId id, SigStruct* sig) { throw usage_error("Not valid in read-only mode."); }
 	void add_index(imageId id, size_t index) { (*this)[id] = index; }
@@ -371,14 +373,15 @@ template<bool is_simple>
 struct index_iterator;
 
 // In normal mode, we have image data in the sigMap, so iterate over that.
-template<> struct index_iterator<false> : public sigMap<false>::iterator {
+template<>
+struct index_iterator<false> : public sigMap<false>::iterator {
 	typedef sigMap<false>::iterator base_type;
 	index_iterator(const base_type& itr, dbSpaceImpl<false>& db) : base_type(itr) { }
 
 	imageId id() const { return (*this)->first; }
 	SigStruct* sig() const { return (*this)->second; }
 	size_t index() const { return sig()->index; }
-	const lumin_int& avgl() const { return sig()->avgl; }
+	const lumin_native& avgl() const { return sig()->avgl; }
 	int width() const { return sig()->width; }
 	int height() const { return sig()->height; }
 	uint16_t set() const { return sig()->set; }
@@ -390,7 +393,8 @@ template<> struct index_iterator<false> : public sigMap<false>::iterator {
 // In simple mode, we have only the image_info data available, so iterate over that.
 // In read-only mode, we additionally have the index into the image_info array in a sigMap.
 // Using functions that rely on this in simple mode will throw a usage_error.
-template<> struct index_iterator<true> : public image_info_list::iterator {
+template<>
+struct index_iterator<true> : public image_info_list::iterator {
 	typedef image_info_list::iterator base_type;
 	index_iterator(const base_type& itr, dbSpaceImpl<true>& db) : base_type(itr), m_db(db) { }
 	index_iterator(const sigMap<true>::iterator& itr, dbSpaceImpl<true>& db);	// implemented below
@@ -398,7 +402,7 @@ template<> struct index_iterator<true> : public image_info_list::iterator {
 	imageId id() const { return (*this)->id; }
 	SigStruct* sig() const { throw usage_error("Not valid in read-only mode."); }
 	size_t index() const;	// implemented below
-	const lumin_int& avgl() const { return (*this)->avgl; }
+	const lumin_native& avgl() const { return (*this)->avgl; }
 	int width() const { return (*this)->width; }
 	int height() const { return (*this)->height; }
 	uint16_t set() const { return (*this)->set; }
@@ -484,7 +488,7 @@ public:
 	static void imgDataFromFile(const char* filename, imageId id, ImgData* img);
 	static void imgDataFromBlob(const void* data, size_t data_size, imageId id, ImgData* img);
 
-	static bool is_grayscale(const lumin_int& avgl);
+	static bool is_grayscale(const lumin_native& avgl);
 
 	virtual bool isImageGrayscale(imageId id);
 	virtual Score calcAvglDiff(imageId id1, imageId id2);
@@ -497,7 +501,7 @@ public:
 
 protected:
 	virtual void getImgDataByID(imageId id, ImgData* img) = 0;
-	virtual void getImgAvgl(imageId id, lumin_int avgl) = 0;
+	virtual void getImgAvgl(imageId id, lumin_native& avgl) = 0;
 
 	static void sigFromImage(Image* image, imageId id, ImgData* sig);
 
@@ -600,7 +604,7 @@ private:
 	void addSigToBuckets(const ImgData* nsig);
 
 	void getImgDataByID(imageId id, ImgData* img) { *img = get_sig_from_cache(id); }
-	void getImgAvgl(imageId id, lumin_int avgl) { memcpy(avgl, find(id).avgl(), sizeof(avgl)); }
+	void getImgAvgl(imageId id, lumin_native& avgl) { avgl = find(id).avgl(); }
 
 	size_t get_sig_cache();
 	ImgData get_sig_from_cache(imageId i);
@@ -665,7 +669,7 @@ protected:
 
 	ImageMap::iterator find(imageId i);
 	void getImgDataByID(imageId id, ImgData* img) { *img = get_sig(m_images.find(id)->second); }
-	void getImgAvgl(imageId id, lumin_int avgl) { image_info::avglf2i(get_sig(m_images.find(id)->second).avglf, avgl); }
+	void getImgAvgl(imageId id, lumin_native& avgl) { image_info::avglf2i(get_sig(m_images.find(id)->second).avglf, avgl); }
 	ImgData get_sig(size_t ind);
 
 	virtual void load(const char* filename);

@@ -1,3 +1,11 @@
+iqdb-20161008:
+- C++11 compatibility (and remove old GNU extensions)
+- update for recent libpng API
+- fix problems with colorspace (allow SRGB)
+- updated scripts
+- updated PHP code for compatibility with PHP 7
+- experimental version using floats, turns out it's still slower
+
 iqdb-20130824:
 - fix include files for newer gcc
 - updated scripts

@@ -89,7 +89,7 @@ imgdb::ImgData* make_data(int id) {
 
 void check(imgdb::dbSpace* db, int range, const deleted_t& removed) {
 	int error = 0;
-	typedef std::unordered_map<imgdb::imageId, int> id_map;
+	typedef std::tr1::unordered_map<imgdb::imageId, int> id_map;
 	id_map ids;
 	for (int i = 1; i <= range; i++)
 		ids[i] = 0;
@@ -128,8 +128,8 @@ void query(imgdb::dbSpace* db, unsigned int id, const deleted_t& removed) {
 	fprintf(stderr, "q%d ", id);
 	imgdb::sim_vector res = db->queryImg(imgdb::queryArg(*make_data(id), 8, 0));
 	bool shouldfail = removed.find(id) != removed.end();
-	if (shouldfail != (res[0].id != id || res[0].width != 800+id || res[0].height != 600+id || res[0].score < imgdb::ScoreMax * 9 / 10)) {
-		fprintf(stderr, "%s: id=%lld %dx%d %.1f\n", shouldfail ? "FOUND DELETED IMAGE" : "NOT FOUND", (long long) res[0].id, res[0].width, res[0].height, 1.0*res[0].score/imgdb::ScoreMax);
+	if (shouldfail != (res[0].id != id || res[0].width != 800+id || res[0].height != 600+id || imgdb::MakeScore(res[0].score) * 9 / 10)) {
+		fprintf(stderr, "%s: id=%lld %dx%d %.1f\n", shouldfail ? "FOUND DELETED IMAGE" : "NOT FOUND", (long long) res[0].id, res[0].width, res[0].height, 1.0*res[0].score/imgdb::MakeScore(1));
 		throw imgdb::internal_error("Failed!");
 	}
 }

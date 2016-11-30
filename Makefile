@@ -2,20 +2,13 @@
 #----------------------------
 
 # Any extra options you need
-# CFLAGS=-I/usr/local/Cellar/libpng12/1.2.50/include 
-# LDFLAGS=-L/usr/local/Cellar/libpng12/1.2.50/lib
-# CC=clang
-CFLAGS+=-std=c++11
-
-ifneq (${CC},clang)
-CFLAGS+=-fpeel-loops
-endif
-
 EXTRADEFS=
 
-# Graphics library to use, can be GD or ImageMagick.
+# Graphics library to use, can be GD (recommended) or ImageMagick (deprecated, outdated).
 IMG_LIB=GD
 #IMG_LIB=ImageMagick
+
+PKG_CONFIG_PATH=/usr/local/opt/libpng12/lib/pkgconfig:/usr/local/opt/gd/lib/pkgconfig
 
 # In simple mode, by default all data needed for queries is now
 # read into memory, using in total about 500 bytes per image. It
@@ -35,11 +28,25 @@ override DEFS+=-DNO_SUPPORT_OLD_VER
 # method of storing the image index internally (in simple mode).
 override DEFS+=-DUSE_DELTA_QUEUE
 
+# Set this if you have a C++11 compatible compiler with std::unordered_map
+override DEFS+=-DHAVE_UNORDERED_MAP
+# For GCC the C++11 support also needs to be enabled explicitly
+override DEFS+=-std=c++11
+# If your compiler is older and has std::tr1::unordered_map use this
+# override DEFS+=-DHAVE_TR1_UNORDERED_MAP
+
 # This may help or hurt performance. Try it and see for yourself.
 override DEFS+=-fomit-frame-pointer
 
 # Force use of a platform independent 64-bit database format.
 override DEFS+=-DFORCE_64BIT
+
+# By default iqdb uses integer math for the similarity computation,
+# because it is often slightly faster than floating point math
+# (and iqdb cannot make use of SSE et.al.) You can remove this option
+# if you wish to compare both versions. This setting has
+# negligible impact on the value of the similarity result.
+override DEFS+=-DINTMATH
 
 # -------------------------
 #  no configuration below
@@ -48,6 +55,11 @@ override DEFS+=-DFORCE_64BIT
 .SUFFIXES:
 
 all:	iqdb
+
+.PHONY: clean
+
+clean:
+	rm -f *.o iqdb
 
 %.o : %.h
 %.o : %.cpp
@@ -63,8 +75,8 @@ haar.le.o :
 .ALWAYS:
 
 ifeq (${IMG_LIB},GD)
-IMG_libs = -lgd $(shell gdlib-config --ldflags; gdlib-config --libs)
-IMG_flags = $(shell gdlib-config --cflags)
+IMG_libs = -ljpeg $(shell pkg-config --libs gdlib; pkg-config --libs libpng12)
+IMG_flags = $(shell pkg-config --cflags gdlib; pkg-config --cflags libpng12)
 IMG_objs = resizer.o
 override DEFS+=-DLIB_GD
 else
@@ -96,5 +108,3 @@ test-resizer : test-resizer.o resizer.o debug.o
 %.S:	.ALWAYS
 	g++ -S -o $@ $*.cpp -O2 ${CFLAGS} -DNDEBUG -Wall -DLinuxBuild -g ${IMG_flags} ${DEFS} ${EXTRADEFS}
 
-clean:
-	rm -f *.o iqdb

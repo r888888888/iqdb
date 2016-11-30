@@ -36,6 +36,9 @@ DEF_DEBUG(io,		18)
 DEF_DEBUG(reads,	19)
 DEF_DEBUG(protocol,	20)
 DEF_DEBUG(iqdb,		21)
+DEF_DEBUG(queryqueue,	27)
+DEF_DEBUG(callbacks,    28)
+DEF_DEBUG(queuestats,   29)
 #endif
 #ifdef DEBUG_IQDB
 DEF_DEBUG(connections,	7)
@@ -57,7 +60,6 @@ DEF_DEBUG(image_info,	23)
 DEF_DEBUG(prescale,	24)
 DEF_DEBUG(imgdb,	25)
 DEF_DEBUG(urlparse,	26)
-DEF_DEBUG(queryqueue,	27)
 
 static inline timeval now() { timeval tv; gettimeofday(&tv, NULL); return tv; }
 static inline float elapsed(const timeval& from, const timeval& to = now()) {

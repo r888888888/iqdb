@@ -69,7 +69,6 @@ our $links = 0;			# set to 1 to not ignore symlinks
 #
 
 use Digest::MD5 qw(md5_hex);
-use Image::Info qw(image_info);
 use File::Find;
 use Storable qw(store_fd fd_retrieve);
 
@@ -110,13 +109,23 @@ if ($chdir) {
 $| = 1;
 
 my %exclude;
-if (open my $dupes, "<", $exclude_file) { while (<$dupes>) {
-	next if /^\s*#/;
-	chomp;
-	$normalize->() if $normalize;
-	$exclude{$_} = 1;
-	warn "$_ does not exist\n" unless -e;
-} }
+my $changed;
+if (open my $dupes, "<", $exclude_file) { 
+	while (<$dupes>) {
+		my $org = $_;
+		next if /^\s*#/;
+		chomp;
+		$normalize->() if $normalize;
+		++$changed and warn "$_ does not exist\n" and next unless -e;
+		$exclude{$_} = [ $org, scalar keys %exclude ];
+	}
+	if ($changed and not -e "$exclude_file.new")
+	{
+		open $dupes, ">", "$exclude_file.new" or die;
+		print $dupes $_->[0] for sort { $a->[1] <=> $b->[1] } values %exclude;
+		warn "Wrote $exclude_file.new";
+	}
+}
 %exclude = () if $flags and $flags =~ /-i/;
 
 my $idlist;
@@ -188,7 +197,7 @@ for (keys %{$idlist->{files}}) {
 	delete $idlist->{files}{$_};
 	$didremove++;
 }
-print "$didadd images added and $didremove images removed.\n";
+print "\n$didadd images added and $didremove images removed.\n";
 #print $iqdb "rehash 0\n" if $didremove;
 #if ($didremove or $didadd) {
 #	print $iqdb "saveas 0 $db_file_tmp\n";

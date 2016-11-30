@@ -1,8 +1,15 @@
 #!/bin/bash
+#[ "$1" = "complete" ] || exit 0
 
 cd /home/iqdb/src
 export HOME=/home/iqdb
-
+#exec >> refresh.log 2>> refresh.err
+#date
+#date 1>&2
+if [ `id -u` -ne 1000 ]; then
+	echo Incorrect user ID: `id`
+	exit 1;
+fi
 EC=0
 LOCKFILE=update.lock
 if ! ( set -o noclobber; echo "$$" > "$LOCKFILE") 2> /dev/null; then
@@ -10,6 +17,7 @@ if ! ( set -o noclobber; echo "$$" > "$LOCKFILE") 2> /dev/null; then
 	LOCKPID=`cat "$LOCKFILE"`
 	echo Held by pid $LOCKPID: `cat /proc/$LOCKPID/cmdline`
 	exit 1;
+	exit 0;
 fi
 
 [ "$1" = "lock" ] && exit 0
@@ -17,6 +25,7 @@ fi
 trap 'rm -f "$LOCKFILE"' HUP INT QUIT TERM EXIT
 
 export http_proxy=http://localhost:3128/
+#export http_proxy=http://rps:3129/
 
 MODE="$1"
 shift
@@ -38,10 +47,12 @@ if [ "$MODE" = "update" -o "$MODE" = "complete" ]; then
 	./danbooru-change $FLAG gelbooru &
 	./danbooru-change $FLAG sankaku &
 	./danbooru-change $FLAG e_shuushuu &
-	./danbooru-change $FLAG anigal &
-	./danbooru-change $FLAG zerochan &
+	#if perl -le 'for(@ARGV){exit 0 unless -f; exit 1<-M}' ~/doujin/anigal/.last_reason; then
+		./danbooru-change $FLAG anigal &
+	#fi
+	./danbooru-change $FLAG zerochan -m &	# -m skip 404 and empty thumbs
 	./danbooru-change $FLAG mangadrawing &
-	./danbooru-change $FLAG anime-pictures &
+	./danbooru-change $FLAG anime-pictures -m &	# -m skip 404
 	./danbooru-change $FLAG 3dbooru &
 	#./danbooru-change $FLAG nekobooru &
 	./danbooru-change $FLAG idol &
@@ -74,9 +85,9 @@ if [ "$MODE" = "full" -o "$MODE" = "complete" ]; then
 	./danbooru-change $FLAG sankaku    full &
 	./danbooru-change $FLAG e_shuushuu full &
 	./danbooru-change $FLAG anigal     full &
-	./danbooru-change $FLAG zerochan &
+	./danbooru-change $FLAG zerochan -m &
 	./danbooru-change $FLAG mangadrawing &
-	./danbooru-change $FLAG anime-pictures &
+	./danbooru-change $FLAG anime-pictures -m &	# -m skip 404
 	./danbooru-change $FLAG 3dbooru    full &
 	#./danbooru-change $FLAG nekobooru  full &
 	./danbooru-change $FLAG idol       full &
@@ -104,3 +115,4 @@ elif [ "$MODE" != "restart" ]; then
 	echo Unknown mode, run as $0 auto/update/full/restart
 	exit 1;
 fi;
+

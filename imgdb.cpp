@@ -35,6 +35,7 @@
 
 /* STL includes */
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 /* iqdb includes */
@@ -46,9 +47,23 @@ extern int debug_level;
 
 namespace imgdb {
 
+//#define DEBUG_QUERY
+
 // Globals
 //keywordsMapType globalKwdsMap;
+#ifdef INTMATH
 Score weights[2][6][3];
+
+#define ScD(x) ((double)(x)/imgdb::ScoreMax)
+#define DScD(x) ScD(((x)/imgdb::ScoreMax))
+#define DScSc(x) ((x) >> imgdb::ScoreScale)
+#else
+#define weights weightsf
+
+#define ScD(x) (x)
+#define DScD(x) (x)
+#define DScSc(x) (x)
+#endif
 
 /* Fixed weight mask for pixel positions (i,j).
 Each entry x = i*NUM_PIXELS + j, gets value max(i,j) saturated at 5.
@@ -261,7 +276,6 @@ void imageIdIndex_list<false, false>::remove(image_id_index i) {
 //else fprintf(stderr, "NOT FOUND!!!\n");
 }
 
-//template<>
 void imageIdIndex_list<true, true>::set_base() {
 	if (!m_base.empty()) return;
 
@@ -317,8 +331,6 @@ inline dbSpaceAlter::ImageMap::iterator dbSpaceAlter::find(imageId i) {
 	return itr;
 }
 
-static const size_t no_cacheOfs = ~size_t();
-
 void initImgBin()
 {
 	imgBinInited = 1;
@@ -355,10 +367,12 @@ void initImgBin()
 	// Note: imgBin[0] == 0
 
 	/* Integer weights. */
+#ifdef INTMATH
 	for (i = 0; i < 2; i++)
 		for (j = 0; j < 6; j++)
 			for (int c = 0; c < 3; c++)
 				weights[i][j][c] = lrint(weightsf[i][j][c] * ScoreMax);
+#endif
 }
 
 template<bool is_simple>
@@ -403,12 +417,12 @@ int dbSpaceAlter::getImageHeight(imageId id) {
 	return get_sig(find(id)->second).height;
 }
 
-inline bool dbSpaceCommon::is_grayscale(const lumin_int& avgl) {
-	return abs(avgl[1]) + abs(avgl[2]) < ScoreMax * 6 / 1000;
+inline bool dbSpaceCommon::is_grayscale(const lumin_native& avgl) {
+	return std::abs(avgl.v[1]) + std::abs(avgl.v[2]) < MakeScore(6) / 1000;
 }
 
 bool dbSpaceCommon::isImageGrayscale(imageId id) {
-	lumin_int avgl;
+	lumin_native avgl;
 	getImgAvgl(id, avgl);
 	return is_grayscale(avgl);
 }
@@ -481,7 +495,7 @@ void dbSpaceCommon::sigFromImage(Image* image, imageId id, ImgData* sig) {
 
 template<typename B>
 inline void dbSpaceCommon::bucket_set<B>::add(const ImgData& nsig, count_t index) {
-	lumin_int avgl;
+	lumin_native avgl;
 	SigStruct::avglf2i(nsig.avglf, avgl);
 	for (int i = 0; i < NUM_COEFS; i++) {	// populate buckets
 
@@ -631,7 +645,7 @@ inline void check_image(Image* image) {
 	if (!image)	// unable to read image
 		throw image_error("Unable to read image data.");
 
-	if (image->colorspace != RGBColorspace)
+	if (image->colorspace != RGBColorspace && image->colorspace != sRGBColorspace)
 		throw image_error("Invalid color space.");
 	if (image->storage_class != DirectClass) {
 		SyncImage(image);
@@ -1309,7 +1323,7 @@ struct sim_result : public index_iterator<is_simple>::base_type {
 template<bool is_simple>
 inline bool dbSpaceImpl<is_simple>::skip_image(const imageIterator& itr, const queryArg& query) {
 	return
-		(is_simple && !itr.avgl()[0])
+		(is_simple && !itr.avgl().v[0])
 		||
 		((query.flags & flag_mask) && ((itr.mask() & query.mask_and) != query.mask_xor))
 	;
@@ -1331,11 +1345,27 @@ sim_vector dbSpaceImpl<is_simple>::do_query(queryArg q) {
 	// Luminance score (DC coefficient).
 	for (imageIterator itr = image_begin(); itr != image_end(); ++itr) {
 		Score s = 0;
-		for (c = 0; c < num_colors; c++)
-			s += (((DScore)weights[sketch][0][c]) * abs(itr.avgl()[c] - q.avgl[c])) >> ScoreScale;
+#ifdef DEBUG_QUERY
+		fprintf(stderr, "%zd:", itr.index());
+#endif
+		for (c = 0; c < num_colors; c++) {
+#ifdef DEBUG_QUERY
+			Score o=s;
+			fprintf(stderr, " %d=%f*abs(%f-%f)", c, ScD(weights[sketch][0][c]), ScD(itr.avgl().v[c]), ScD(q.avgl.v[c]));
+#endif
+			s += DScSc(((DScore)weights[sketch][0][c]) * std::abs(itr.avgl().v[c] - q.avgl.v[c]));
+#ifdef DEBUG_QUERY
+			fprintf(stderr, "=%f", ScD(s-o));
+#endif
+		}
 		scores[itr.index()] = s;
 	}
 
+#ifdef DEBUG_QUERY
+	fprintf(stderr, "Lumi scores:");
+	for (int i = 0; i < count; i++) fprintf(stderr, " %d=%f", i, ScD(scores[i]));
+	fprintf(stderr, "\n");
+#endif
 #if QUERYSTATS
 	size_t coefcnt = 0, coeflen = 0, coefmax = 0;
 	size_t setcnt[NUM_COEFS * num_colors];
@@ -1351,7 +1381,7 @@ sim_vector dbSpaceImpl<is_simple>::do_query(queryArg q) {
 			if (q.flags & flag_nocommon && bucket.size() > count / 10) continue;
 
 			Score weight = weights[sketch][imgBin[idx]][c]; 
-//fprintf(stderr, "%d:%d=%d has %zd=%d, ", b, c, sig[c][b], dbSpace[dbId]->imgbuckets[c][pn][idx].size(), weight);
+//fprintf(stderr, "%d:%d=%d has %zd=%f\n", b, c, idx, bucket.size(), ScD(weight));
 			scale -= weight;
 
 			// update the score of every image which has this coef
@@ -1375,6 +1405,12 @@ sim_vector dbSpaceImpl<is_simple>::do_query(queryArg q) {
 			}
 		}
 	}
+//fprintf(stderr, "Total scale=%f\n", ScD(scale));
+#ifdef DEBUG_QUERY
+	fprintf(stderr, "Final scores:");
+	for (int i = 0; i < count; i++) fprintf(stderr, " %d=%f", i, ScD(scores[i]));
+	fprintf(stderr, "\n");
+#endif
 
 	typedef std::priority_queue<sim_result<is_simple> > sigPriorityQueue;
 
@@ -1433,14 +1469,16 @@ sim_vector dbSpaceImpl<is_simple>::do_query(queryArg q) {
 	}
 
 //fprintf(stderr, "Have %zd images in result set.\n", pqResults.size());
-	scale = ((DScore) ScoreMax) * ScoreMax / scale;
+	if (scale != 0)
+		scale = ((DScore)MakeScore(1)) * MakeScore(1) / scale;
+//fprintf(stderr, "Inverted scale=%f\n", ScD(scale));
 	while (!pqResults.empty()) {
 		const sim_result<is_simple>& curResTmp = pqResults.top();
 
 		imageIterator itr(curResTmp, *this);
-//fprintf(stderr, "Candidate %08lx = %.2f, set %x has %zd.\n", itr.id(), (double)curResTmp.score/ScoreMax, itr.set(), sets[itr.set()]);
+//fprintf(stderr, "Candidate %08lx = %.2f, set %x has %zd.\n", itr.id(), ScD(curResTmp.score), itr.set(), sets[itr.set()]);
 		if (!(q.flags & flag_uniqueset) || sets[itr.set()]-- < 2)
-			V.push_back(sim_value(itr.id(), (((DScore)curResTmp.score) * 100 * scale) >> ScoreScale, itr.width(), itr.height()));
+			V.push_back(sim_value(itr.id(), DScSc(((DScore)curResTmp.score) * 100 * scale), itr.width(), itr.height()));
 //else fprintf(stderr, "Skipped!\n");
 		pqResults.pop();
 	}
@@ -1462,7 +1500,7 @@ sim_vector dbSpaceImpl<is_simple>::do_query(queryArg q) {
 	\*/
 #endif
 	std::reverse(V.begin(), V.end());
-//fprintf(stderr, "Returning %zd images.\n", V.size());
+//fprintf(stderr, "Returning %zd images, top score %f.\n", V.size(), ScD(V[0].score));
 	return V;
 
 }
@@ -1533,7 +1571,7 @@ template<>
 void dbSpaceImpl<true>::removeImage(imageId id) {
 	// Can't efficiently remove it from buckets, just mark it as
 	// invalid and remove it from query results.
-	m_info[find(id).index()].avgl[0] = 0;
+	m_info[find(id).index()].avgl.v[0] = 0;
 	m_images.erase(id);
 }
 
@@ -1548,7 +1586,7 @@ void dbSpaceAlter::removeImage(imageId id) {
 
 template<typename B>
 inline void dbSpaceCommon::bucket_set<B>::remove(const ImgData& nsig) {
-	lumin_int avgl;
+	lumin_native avgl;
 	SigStruct::avglf2i(nsig.avglf, avgl);
 	for (int i = 0; 0 && i < NUM_COEFS; i++) {
 		FLIP(nsig.sig1[i]); FLIP(nsig.sig2[i]); FLIP(nsig.sig3[i]);
@@ -1571,10 +1609,10 @@ Score dbSpaceCommon::calcAvglDiff(imageId id1, imageId id2) {
 	/* return the average luminance difference */
 
 	// are images on db ?
-	lumin_int avgl1, avgl2;
+	lumin_native avgl1, avgl2;
 	getImgAvgl(id1, avgl1);
 	getImgAvgl(id2, avgl2);
-	return abs(avgl1[0] - avgl2[0]) + abs(avgl1[1] - avgl2[1]) + abs(avgl1[2] - avgl2[2]);
+	return std::abs(avgl1.v[0] - avgl2.v[0]) + std::abs(avgl1.v[1] - avgl2.v[1]) + std::abs(avgl1.v[2] - avgl2.v[2]);
 }	
 
 Score dbSpaceCommon::calcSim(imageId id1, imageId id2, bool ignore_color) {
@@ -1587,14 +1625,14 @@ Score dbSpaceCommon::calcSim(imageId id1, imageId id2, bool ignore_color) {
 	Idx* const sig2[3] = { dsig2.sig1, dsig2.sig2, dsig2.sig3 };
 
 	Score score = 0, scale = 0;
-	lumin_int avgl1, avgl2;
+	lumin_native avgl1, avgl2;
 	image_info::avglf2i(dsig1.avglf, avgl1);
 	image_info::avglf2i(dsig2.avglf, avgl2);
 
 	int cnum = ignore_color || is_grayscale(avgl1) || is_grayscale(avgl2) ? 1 : 3;
 
 	for (int c = 0; c < cnum; c++)
-		score += (2*((DScore)weights[0][0][c]) * abs(avgl1[c] - avgl2[c])) >> ScoreScale;
+		score += DScSc(2*((DScore)weights[0][0][c]) * std::abs(avgl1.v[c] - avgl2.v[c]));
 
 	for (int c = 0; c < cnum; c++) {
 		std::sort(sig1[c] + 0, sig1[c] + NUM_COEFS);
@@ -1604,7 +1642,7 @@ Score dbSpaceCommon::calcSim(imageId id1, imageId id2, bool ignore_color) {
 			int ind1 = b1 == NUM_COEFS ? std::numeric_limits<int>::max() : sig1[c][b1];
 			int ind2 = b2 == NUM_COEFS ? std::numeric_limits<int>::max() : sig2[c][b2];
 
-			Score weight = weights[0][imgBin[abs(ind1 < ind2 ? ind1 : ind2)]][c];
+			Score weight = weights[0][imgBin[std::abs(ind1 < ind2 ? ind1 : ind2)]][c];
 			scale -= weight;
 
 			if (ind1 == ind2)
@@ -1615,12 +1653,12 @@ Score dbSpaceCommon::calcSim(imageId id1, imageId id2, bool ignore_color) {
 		}
 	}
 
-	scale = ((DScore) ScoreMax) * ScoreMax / scale;
-	return (((DScore) score) * 100 * scale) >> ScoreScale;
+	scale = ((DScore) MakeScore(1)) * MakeScore(1) / scale;
+	return DScSc(((DScore) score) * 100 * scale);
 }
 
 Score dbSpaceCommon::calcDiff(imageId id1, imageId id2, bool ignore_color) {
-	return 100 * ScoreMax - calcSim(id1, id2, ignore_color);
+	return MakeScore(100) - calcSim(id1, id2, ignore_color);
 }
 
 template<>
@@ -1673,7 +1711,7 @@ stats_t dbSpaceImpl<is_simple>::getCoeffStats() {
 	ret.reserve(imgbuckets.count());
 
 #ifdef DEBUG_STATS
-	typedef std::unordered_map<int, size_t> deltas_t;
+	typedef std::tr1::unordered_map<int, size_t> deltas_t;
 	deltas_t deltas;
 	size_t total = 0, b4 = 0, b70 = 0, b16k = 0, a16k = 0, b255 = 0;
 #endif
@@ -1736,7 +1774,7 @@ imageId_list dbSpaceImpl<is_simple>::getImgIdList() {
 
 	ids.reserve(getImgCount());
 	for (imageIterator it = image_begin(); it != image_end(); ++it)
-	    if (!is_simple || it.avgl()[0] != 0)
+	    if (!is_simple || it.avgl().v[0] != 0)
 		ids.push_back(it.id());
 
 	return ids;

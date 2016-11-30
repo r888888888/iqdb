@@ -41,10 +41,6 @@
 #include <algorithm>
 #include <list>
 #include <vector>
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cmath>
 
 #include "auto_clean.h"
 #define DEBUG_IQDB
@@ -114,8 +110,15 @@ private:
 	list_type  m_list;
 };
 
+#ifdef INTMATH
 #define ScD(x) ((double)(x)/imgdb::ScoreMax)
 #define DScD(x) ScD(((x)/imgdb::ScoreMax))
+#define DScSc(x) ((x) >> imgdb::ScoreScale)
+#else
+#define ScD(x) (x)
+#define DScD(x) (x)
+#define DScSc(x) (x)
+#endif
 
 // Minimum score to consider an image a relevant match. Starting from the end of the list
 // (least similar), average and standard deviation are computed. When the std.dev. exceeds
@@ -142,16 +145,22 @@ imgdb::Score min_sim(const C& sim, imgdb::Score min_stddev, imgdb::Score stddev_
 		//imgdb::Score stddev = lrint(sqrt((double)sqd/cnt));
 		//imgdb::Score min_sim = avg + (((imgdb::DScore)stddev_frac * stddev) >> imgdb::ScoreScale);
 //fprintf(stderr, "Got %d. sum=%.1f avg=%.1f sqsum=%.1f² stddev=%.1f.\n", cnt, ScD(sum), ScD(avg), ScD(sqrt(sqsum)), ScD(sqrt((double)sqd/cnt)));
-		if (sqd > min_sqd * cnt) return avg + lrint((double)stddev_frac * sqrt(sqd/cnt) / imgdb::ScoreMax);
+		if (sqd > min_sqd * cnt) {
+#ifdef INTMATH
+			return avg + lrint((double)stddev_frac * sqrt(sqd/cnt) / imgdb::ScoreMax);
+#else
+			return avg + stddev_frac * sqrt(sqd/cnt);
+#endif
+		}
 	}
 	return -1;
 }
 
 template<typename C>
 void stddev_limit(C& sim, uint mindev) {
-	imgdb::Score min = min_sim(sim, mindev << imgdb::ScoreScale, imgdb::ScoreMax / 2);
+	imgdb::Score min = min_sim(sim, imgdb::MakeScore(mindev), imgdb::MakeScore(1) / 2);
 	if (min == -1)
-		min = 90 << imgdb::ScoreScale;
+		min = imgdb::MakeScore(90);
 
 	for (typename C::iterator itr = sim.begin(); itr != sim.end(); ++itr)
 		if (itr->score < min) {
@@ -199,7 +208,7 @@ void dupe_map::link(imageId one, imageId two) {
 	if (one == two) return;
 ///	if (one > two) std::swap(one, two);
 
-	DEBUG(dupe_finder)("\nLinking %08" FMT_imageId " -> %08" FMT_imageId ": ", one, two);
+	DEBUG(dupe_finder)("\nLinking %08" FMT_imageId" -> %08" FMT_imageId ": ", one, two);
 	iterator itrOne = find(one);
 	iterator itrTwo = find(two);
 	if (itrOne == end()) {
@@ -310,9 +319,9 @@ fprintf(stderr, "Min score: %.1f\n", ScD(m));
 		DEBUG(dupe_finder)("%3zd%%\r", 100*(itr - images.begin())/images.size());
 		imgdb::sim_vector sim = db->queryImg(imgdb::queryArg(db, *itr, 16, 0)); // imgdb::dbSpace::flag_nocommon));
 
-		imgdb::Score min = min_sim(sim, mindev << imgdb::ScoreScale, imgdb::ScoreMax / 2);
-//fprintf(stderr, "%08lx got %4.1f +/- %4.1f: ", *itr, (double)avg/imgdb::ScoreMax, (double)stddev/imgdb::ScoreMax);
-//for (size_t i = 1; i < sim.size(); i++) fprintf(stderr, "%08lx:%4.1f ", sim[i].first, (double)sim[i].second/imgdb::ScoreMax);
+		imgdb::Score min = min_sim(sim, imgdb::MakeScore(mindev), imgdb::MakeScore(1) / 2);
+//fprintf(stderr, "%08lx got %4.1f +/- %4.1f: ", *itr, ScD(min), 0.0);
+//for (imgdb::sim_vector::iterator sItr = sim.begin(); sItr != sim.end(); ++sItr) fprintf(stderr, "%08lx:%4.1f ", sItr->id, ScD(sItr->score));
 //fprintf(stderr, "\n");
 		if (min < 0) continue;
 
@@ -413,7 +422,7 @@ void add(const char* fn) {
 }
 
 void list(const char* fn) {
-	dbSpaceAuto db(fn, imgdb::dbSpace::mode_simple);
+	dbSpaceAuto db(fn, imgdb::dbSpace::mode_alter);
 	imgdb::imageId_list list = db->getImgIdList();
 	for (imgdb::imageId_list::iterator itr = list.begin(); itr != list.end(); ++itr) printf("%08" FMT_imageId "\n", *itr);
 }
@@ -442,7 +451,7 @@ void query(const char* fn, const char* img, int numres, int flags) {
 	dbSpaceAuto db(fn, imgdb::dbSpace::mode_simple);
 	imgdb::sim_vector sim = db->queryImg(imgdb::queryArg(img, numres, flags));
 	for (size_t i = 0; i < sim.size(); i++)
-		printf("%08" FMT_imageId " %lf %d %d\n", sim[i].id, (double)sim[i].score / imgdb::ScoreMax, sim[i].width, sim[i].height);
+		printf("%08" FMT_imageId " %lf %d %d\n", sim[i].id, ScD(sim[i].score), sim[i].width, sim[i].height);
 }
 
 void diff(const char* fn, imgdb::imageId id1, imgdb::imageId id2) {
@@ -455,10 +464,10 @@ void sim(const char* fn, imgdb::imageId id, int numres) {
 	dbSpaceAuto db(fn, imgdb::dbSpace::mode_readonly);
 	imgdb::sim_vector sim = db->queryImg(imgdb::queryArg(db, id, numres, 0));
 	for (size_t i = 0; i < sim.size(); i++)
-		printf("%08" FMT_imageId " %lf %d %d\n", sim[i].id, (double)sim[i].score / imgdb::ScoreMax, sim[i].width, sim[i].height);
+		printf("%08" FMT_imageId " %lf %d %d\n", sim[i].id, ScD(sim[i].score), sim[i].width, sim[i].height);
 }
 
-enum event_t { DO_QUITANDSAVE=0, DO_ERROR, DO_DONE };
+enum event_t { DO_QUITANDSAVE };
 
 #define DB dbs.at(dbid)
 
@@ -480,7 +489,9 @@ std::pair<char*, size_t> read_blob(const char* size_arg, FILE* rd) {
 	return std::make_pair(blob, blob_size);
 }
 
-event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
+DEFINE_ERROR(command_error,   imgdb::param_error)
+
+void do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 	struct customOpt : public imgdb::queryOpt {
 		customOpt() : mindev(0) {}
 
@@ -496,11 +507,11 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 			if (feof(rd)) {
 				fprintf(wr, "100 EOF detected.\n");
 				DEBUG(warnings)("End of input\n");
-				return DO_ERROR;
+				return;
 			} else if (ferror(rd)) {
 				fprintf(wr, "300 File error %s\n", strerror(errno));
 				DEBUG(errors)("File error %s\n", strerror(errno));
-				return DO_ERROR;
+				return;
 			} else {
 				fprintf(wr, "300 Unknown file error.\n");
 				DEBUG(warnings)("Unknown file error.\n");
@@ -529,10 +540,10 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 			if (!allow_maint) throw imgdb::usage_error("Not authorized");
 			fprintf(wr, "100 Done.\n");
 			fflush(wr);
-			return DO_QUITANDSAVE;
+			throw DO_QUITANDSAVE;
 
 		} else if (!strcmp(command, "done")) {
-			return DO_DONE;
+			return;
 
 		} else if (!strcmp(command, "list")) {
 			int dbid;
@@ -573,7 +584,7 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 				stddev_limit(sim, queryOpt.mindev);
 			fprintf(wr, "101 matches=%zd\n", sim.size());
 			for (size_t i = 0; i < sim.size(); i++)
-				fprintf(wr, "200 %08" FMT_imageId " %lf %d %d\n", sim[i].id, (double)sim[i].score / imgdb::ScoreMax, sim[i].width, sim[i].height);
+				fprintf(wr, "200 %08" FMT_imageId " %lf %d %d\n", sim[i].id, ScD(sim[i].score), sim[i].width, sim[i].height);
 
 			queryOpt.reset();
 
@@ -603,7 +614,7 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 			}
 
 			std::vector<sim_db_value> sim;
-			imgdb::Score merge_min = 100 * imgdb::ScoreMax;
+			imgdb::Score merge_min = imgdb::MakeScore(100);
 			for (query_list::iterator itr = queries.begin(); itr != queries.end(); ++itr) {
 				imgdb::sim_vector dbsim = dbs.at(itr->dbid)->queryImg(imgdb::queryArg(img, itr->numres + 1, itr->flags).merge(multiOpt));
 				if (dbsim.empty()) continue;
@@ -615,29 +626,38 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 				// be too small. And if we got fewer images than we requested, the DB
 				// doesn't even have that many and hence the noise floor is zero.
 				imgdb::Score sim_min = dbsim.back().score;
+//fprintf(stderr, "DB %d: %zd/%d results, noise %f\n", itr->dbid, dbsim.size(), itr->numres, ScD(sim_min));
 				if (dbsim.size() < itr->numres + 1)
 					sim_min = 0;
 				else
 					dbsim.pop_back();
 
 				merge_min = std::min(merge_min, sim_min);
+#ifdef INTMATH
 				imgdb::DScore slope = sim_min == 100 * imgdb::ScoreMax ? imgdb::ScoreMax : 
 					(((imgdb::DScore)100 * imgdb::ScoreMax) << imgdb::ScoreScale) / (100 * imgdb::ScoreMax - sim_min);
+#else
+				imgdb::DScore slope = sim_min == 100 ? 1 : 100 / (100 - sim_min);
+#endif
+//fprintf(stderr, "Slope is %f=(100/100-%f)\n", ScD(slope), ScD(sim_min));
 				imgdb::DScore offset = - slope * sim_min;
+//fprintf(stderr, "Offset is %f=-%f*%f\n", DScD(offset), ScD(slope), ScD(sim_min));
 
 				for (imgdb::sim_vector::iterator sitr = dbsim.begin(); sitr != dbsim.end(); ++sitr) {
-					sitr->score = (slope * sitr->score + offset) >> imgdb::ScoreScale;
+//imgdb::Score o=sitr->score;
+					sitr->score = DScSc(slope * sitr->score + offset);
+//fprintf(stderr, "   %f -> %f\n", ScD(o), ScD(sitr->score));
 					sim.push_back(sim_db_value(*sitr, itr->dbid));
 				}
 			}
 
 			std::sort(sim.begin(), sim.end(), cmp_sim_high());
-			imgdb::DScore slope = imgdb::ScoreMax - merge_min / 100;
+			imgdb::DScore slope = imgdb::MakeScore(1) - merge_min / 100;
 			if (queryOpt.mindev > 0)
 				stddev_limit(sim, queryOpt.mindev);
 			fprintf(wr, "101 matches=%zd\n", sim.size());
 			for (size_t i = 0; i < sim.size(); i++)
-				fprintf(wr, "201 %d %08" FMT_imageId " %lf %d %d\n", sim[i].db, sim[i].id, (double)((slope * sim[i].score >> imgdb::ScoreScale) + merge_min) / imgdb::ScoreMax, sim[i].width, sim[i].height);
+				fprintf(wr, "201 %d %08" FMT_imageId " %f %d %d\n", sim[i].db, sim[i].id, DScD((slope * sim[i].score)) + ScD(merge_min), sim[i].width, sim[i].height);
 
 			queryOpt.reset();
 
@@ -652,7 +672,7 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 				stddev_limit(sim, queryOpt.mindev);
 			fprintf(wr, "101 matches=%zd\n", sim.size());
 			for (size_t i = 0; i < sim.size(); i++)
-				fprintf(wr, "200 %08" FMT_imageId " %lf %d %d\n", sim[i].id, (double)sim[i].score / imgdb::ScoreMax, sim[i].width, sim[i].height);
+				fprintf(wr, "200 %08" FMT_imageId " %lf %d %d\n", sim[i].id, ScD(sim[i].score), sim[i].width, sim[i].height);
 
 			queryOpt.reset();
 
@@ -760,8 +780,11 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 				debug_level = strtol(arg, NULL, 16);
 			fprintf(wr, "100 Debug level %x.\n", debug_level);
 
+		} else if (command[0] == 0) {
+			fprintf(wr, "100 NOP.\n");
+
 		} else {
-			throw imgdb::param_error("Unknown command");
+			throw command_error(command);
 		}
 
 		DEBUG(commands)("Command completed successfully.\n");
@@ -782,15 +805,16 @@ event_t do_commands(FILE* rd, FILE* wr, dbSpaceAutoMap& dbs, bool allow_maint) {
 		fprintf(wr, "301 %s %s\n", err.type(), err.what());
 		fflush(wr);
 	}
-
-	return DO_DONE;
 }
 
 void command(int numfiles, char** files) {
 	dbSpaceAutoMap dbs(numfiles, imgdb::dbSpace::mode_alter, files);
 
-	int ret = do_commands(stdin, stdout, dbs, true);
-	if (ret == DO_QUITANDSAVE) {
+	try {
+		do_commands(stdin, stdout, dbs, true);
+
+	} catch (const event_t& event) {
+		if (event != DO_QUITANDSAVE) return;
 		for (int dbid = 0; dbid < numfiles; dbid++)
 			DB.save();
 	}
@@ -798,16 +822,22 @@ void command(int numfiles, char** files) {
 	DEBUG(commands)("End of commands.\n");
 }
 
+DEFINE_ERROR(network_error,   imgdb::base_error)
+
 // Attach rd/wr FILE to fd and automatically close when going out of scope.
 struct socket_stream {
-	socket_stream(int sock) :
-	  	socket(sock),
-		rd(fdopen(sock, "r")),
-		wr(fdopen(sock, "w")) {
+	socket_stream() : socket(-1), rd(NULL), wr(NULL) { }
+	socket_stream(int sock) : socket(-1), rd(NULL), wr(NULL) { set(sock); }
+	void set(int sock) {
+		close();
+
+	  	socket = sock;
+		rd = fdopen(sock, "r");
+		wr = fdopen(sock, "w");
 
 	  	if (sock == -1 || !rd || !wr) {
 			close();
-			throw imgdb::io_error("Cannot fdopen socket.");
+			throw network_error("Cannot fdopen socket.");
 		}
 	}
 	~socket_stream() { close(); }
@@ -923,9 +953,9 @@ void server(const char* hostport, int numfiles, char** files, bool listen2) {
 		int other_fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (other_fd == -1)
 			die("Can't create socket: %s.\n", strerror(errno));
-		if (connect(other_fd, (struct sockaddr*) &bindaddr_high, sizeof(bindaddr_high)))
-			die("Can't connect to old server: %s.\n", strerror(errno));
-
+		if (connect(other_fd, (struct sockaddr*) &bindaddr_high, sizeof(bindaddr_high))) {
+			DEBUG(warnings)("Can't connect to old server: %s.\n", strerror(errno));
+		} else {
 		socket_stream stream(other_fd);
 		DEBUG(base)("Sending quit command.\n");
 		fputs("quit now\n", stream.wr); fflush(stream.wr);
@@ -933,6 +963,7 @@ void server(const char* hostport, int numfiles, char** files, bool listen2) {
 		char buf[1024];
 		while (fgets(buf, sizeof(buf), stream.rd))
 			DEBUG(base)(" --> %s", buf);
+		}
 
 		if (listen2) rebind(fd_low, bindaddr_low);
 		rebind(fd_high, bindaddr_high);
@@ -973,13 +1004,18 @@ void server(const char* hostport, int numfiles, char** files, bool listen2) {
 			DEBUG(errors)("Can't set SO_RCVTIMEO/SO_SNDTIMEO: %s\n", strerror(errno));
 		}
 
-		socket_stream stream(fd);
+		socket_stream stream;
 
 		try {
-			int ret = do_commands(stream.rd, stream.wr, dbs, is_high);
-			if (ret == DO_QUITANDSAVE) {
-				return;
-			}
+			stream.set(fd);
+			do_commands(stream.rd, stream.wr, dbs, is_high);
+
+		} catch (const event_t& event) {
+			if (event == DO_QUITANDSAVE) return;
+
+		} catch (const network_error& err) {
+			DEBUG(connections)("Connection %s:%d network error: %s.\n",
+				inet_ntoa(client.sin_addr), client.sin_port, err.what());
 
 		// Unhandled imgdb::base_error means it was fatal or completely unknown.
 		} catch (const imgdb::base_error& err) {

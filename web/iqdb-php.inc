@@ -41,15 +41,17 @@ function request_srv($line) {
 function parse_response($lines) {
 	$res = array("info" => array(), "values" => array(), "results" => array());
 
-	foreach (split("\n", $lines) as $line) {
+	#debug("got $lines");
+	foreach (explode("\n", $lines) as $line) {
 		#debug("got $line");
-		list($code,$rest) = split(" ", chop($line), 2);
+		list($code,$rest) = explode(" ", chop($line), 2);
 		#debug("code=$code rest=$rest");
 		switch($code) {
+			case "":  break;
 			case 000: break;
 			case 100: array_push($res["info"], $rest);
 				  break;
-			case 101: list($var,$val) = split("=", $rest, 2);
+			case 101: list($var,$val) = explode("=", $rest, 2);
 				  $res["values"][$var] += $val;
 				  break;
 			case 200: array_push($res["results"], "-1 $rest");
@@ -60,10 +62,13 @@ function parse_response($lines) {
 			case 301:
 			case 302: $res["err"] = $rest;
 				  break;
-			default:  return array("fatal" => "Unsupported result code $code $rest");
+			default:
+				  #debug("$line code $code rest $rest");
+				  return array("fatal" => "Unsupported result code $code $rest");
 		}
 	}
 
+	#debug($res["results"]);
 	return $res;
 }
 
@@ -105,15 +110,17 @@ function request_match($file, $querysrv, $options = array()) {
 			if ($query) $query.=' +';
 			$query.=" $db $rflags $numres";
 		}
-		$query = $res."${queryopt}multi_query$query $file\ndone now\n";
+		$query = $res."${queryopt}multi_query$query $file\ndone\n";
 		#debug("Doing multi query:\n$query");
 		$res = request_srv($query);
+		#debug(print_r($res, TRUE));
 		if ($res["results"]) $res["results"] = array_slice($res["results"], 0, $numres);
+		#debug(print_r($res, TRUE));
 	} else {
 		$srv=$services[$services[$querysrv]];
 		$db = $srv["db"];
 		if ($srv["uniqueset"]) $flags |= 8;
-		$query = "count $db\n${queryopt}query $db $flags $numres $file\ndone now\n";
+		$query = "count $db\n${queryopt}query $db $flags $numres $file\ndone\n";
 		#debug("Doing simple query for $querysrv:\n$query");
 		$res = request_srv($query);
 	}
@@ -128,7 +135,7 @@ function request_match($file, $querysrv, $options = array()) {
 	$out = array();
 	foreach ($res["results"] as $line) {
 		$resnum++;
-		list($dbid,$id,$sim,$width,$height) = split(" ", $line);
+		list($dbid,$id,$sim,$width,$height) = explode(" ", $line);
 		if (!$width) $width=-1;
 		if (!$height) $height=-1;
 		if ($dbid == -1) $dbid = $services[$services[$querysrv]]["db"];
@@ -136,10 +143,12 @@ function request_match($file, $querysrv, $options = array()) {
 
 		$srv = $services[$services[$dbid]];
 		if ($srv["process"]) {
-			$arg = array("dbid" => $dbid, "id" => hexdec($id), "sim" => $sim, "width" => $width, "height" => $height, "file" => $file, "resnum" => $resnum);
+			#debug("Will process dbid $dbid id $id");
+			$arg = array("dbid" => $dbid, "id" => hexdec($id), "sim" => $sim, "width" => $width, "height" => $height, "file" => $file, "resnum" => $resnum, "ok" => 0);
 			$args[$dbid][] = $arg;
 			continue;
 		}
+		#debug("Direct dbid $dbid id $id");
 
 		$srvdir = $srv["fullpath"];
 		$pref = substr($id,0,1)."/".substr($id,1,1)."/".substr($id,2,1);
@@ -149,7 +158,7 @@ function request_match($file, $querysrv, $options = array()) {
 		if (count($files) == 0) $files = glob("$srvdir/xx/$id-*");
 		#debug("result: $line. ID:$id Pref:$pref sim:$sim files:".join(";",$files));
 		if (count($files) != 1) continue;
-		if (!ereg("/(".$srv["dir"]."/[0-9a-fx\/]+/([0-9a-f-]+)\.jpg)$", $files[0], $eres)) continue;
+		if (!preg_match("#/(".$srv["dir"]."/[0-9a-fx\/]+/([0-9a-f-]+)\.jpg)$#", $files[0], $eres)) continue;
 		$out[$resnum] = array('sim' => $sim, 'md5' => substr($eres[2],-32), 'fname' => $eres[1], 'tag' => $srv["dir"], 'width' => $width, 'height' => $height);
 	}
 	foreach ($args as &$arg) {
@@ -163,13 +172,30 @@ function request_match($file, $querysrv, $options = array()) {
 		#$debout="";foreach($argnums as $key => $value)$debout.=" $key:$value";debug("Using arg inds$debout");
 		foreach ($matches as &$match) {
 			$argnum = $argnums[$match["id"]];
-			#debug("Result for id ".$match['id']." is arg #$arg and result #".$arg[$argnum]["resnum"]." i.e. id ".$arg[$argnum]["id"]." sim=".$arg[$argnum]["sim"]);
+			#debug("$tag: Result for id ".$match['id']." is arg #$argnum and result #".$arg[$argnum]["resnum"]." i.e. id ".$arg[$argnum]["id"]." sim=".$arg[$argnum]["sim"]);
 			$match['tag'] = $tag;
 			$match['sim'] = $arg[$argnum]["sim"];
 			$out[$arg[$argnum]["resnum"]] = $match;
+			$arg[$argnum]["ok"] = 1;
+		}
+		foreach ($arg as $res) {
+			if (!$res["ok"] && $res['dbid']) {	# ignore for haruhi DB
+				$lf = @fopen("../faulty-id.log", "a");
+				if ($lf) {
+					fputs($lf, "tag=$tag dbid=".$res['dbid']." id=".$res['id']." MISSING_IN_DB\n");
+					fclose($lf);
+				}
+				#debug("DB $tag result not OK: ".print_r($res, TRUE));
+			}
 		}
 	}
-	for($i=0; $i<=$resnum; $i++) $result["match"][] = $out[$i];
+	for($i=0; $i<=$resnum; $i++) {
+		if ($out[$i]) {
+			$result["match"][] = $out[$i];
+		} else {
+			#debug("No DB data for result $i: ".print_r($matches[$i], TRUE));
+		}
+	}
 	#$debout="";foreach ($result["match"] as $key => $val)$debout.=" $key:".$val["id"]."=".$val["sim"];debug("Sims:$debout");
 	$dbtime = microtime_float() - $start;
 	#debug("Got ".count($res["results"])." results parsed into ".count($result["match"])." matches.");
@@ -190,6 +216,7 @@ function process_match($match, $ignoremd5 = false, $ignoretag = '') {
 		$sum += $page['sim'];
 		$sqsum += $page['sim'] * $page['sim'];
 		$count++;
+		#debug("Checking sim=".$page['sim'].", sum=$sum sqsum=$sqsum count=$count");
 	}
 	if(!$count) return array("err" => "Database returned nothing.");
 	$avg = $sum/$count;
@@ -197,9 +224,9 @@ function process_match($match, $ignoremd5 = false, $ignoretag = '') {
 	$minrel = $avg + $stddev/2;
 	$thres = array("avg" => $avg, "stddev" => $stddev, "numrel" => 0);
 
-	if ($stddev < 5 && $match[0]['sim'] < 95) {
+	if ($stddev < 5 && $match[0]['sim'] < 80) {
 		$thres["minsim"] = $minrel;
-		$minrel = 90;
+		$minrel = 70;
 	} else {
 		foreach ($match as $page) {
 			#debug("Checking sim=".$page['sim'].", sum=$sum sqsum=$sqsum avg=$avg stddev=$stddev minrel=$minrel count=$count");
@@ -321,24 +348,24 @@ function make_thumb($img, $org) {
 
 # Output list of matches as XML.
 function produce_xml($match, $thumb, $thres) {
-	global $base_urls, $services;
+	global $services;
 
 	if ($thumb["cname"])
-		$thumburl=$base_urls[0].$thumb['cname'];
+		$thumburl="/".$thumb['cname'];
 	else if (is_array($thumb["fname"]))
-		$thumburl=$base_urls[$thumb["fname"][1]]."thu/".$thumb["fname"][0];
+		$thumburl="/thu/".$thumb["fname"][0];
 	else
-		$thumburl=$base_urls[0]."thu/".$thumb["fname"];
-	echo "<matches preview='$base_url$thumburl' threshold='".$thres["minrel"]."'>\n";
+		$thumburl="/thu/".$thumb["fname"];
+	echo "<matches preview='//iqdb.org$thumburl' threshold='".$thres["minrel"]."'>\n";
 	foreach ($match as $page) {
 		if ($page['md5']) $m = '" md5="'.$page['md5'].'"';
 		else $m = '" id="'.$page['id'].'" name="'.htmlentities($page['eng']).'"';
 		if ($page['width']) $m .= ' width="'.$page['width'].'" height="'.$page['height'].'"';
 		if ($page['fname'])
 			if (is_array($page['fname']))
-				$m .= " preview='".$base_urls[$page['fname'][1]].htmlentities($page['fname'][0], ENT_QUOTES)."'";
+				$m .= " preview='//iqdb.org/".htmlentities($page['fname'][0], ENT_QUOTES)."'";
 			else
-				$m .= " preview='$base_urls[0]".htmlentities($page['fname'], ENT_QUOTES)."'";
+				$m .= " preview='//iqdb.org/".htmlentities($page['fname'], ENT_QUOTES)."'";
 		echo '<match sim="'.$page['sim'].'" service="'.$services[$page['tag']]["site"].$m;
 		if ($page['post'])
 			echo ">".$page['post']."</match>\n";

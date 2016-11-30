@@ -417,13 +417,8 @@ void AutoPNG::read_info() {
 	png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, &interlace_method, NULL, NULL);
 }
 
-png_color_16 AutoPNG::white_background = { 
-	.index = 0, 
-	.red = static_cast<png_uint_16>(~png_uint_16()),
-	.green = static_cast<png_uint_16>(~png_uint_16()), 
-	.blue = static_cast<png_uint_16>(~png_uint_16()), 
-	.gray = static_cast<png_uint_16>(~png_uint_16())
-};
+png_color_16 AutoPNG::white_background
+	= { .index = 0, .red = (png_uint_16)~png_uint_16(), .green = (png_uint_16)~png_uint_16(), .blue = (png_uint_16)~png_uint_16(), .gray = (png_uint_16)~png_uint_16() };
 
 void AutoPNG::setup_trans() {
 	png_set_palette_to_rgb(png);
@@ -486,7 +481,9 @@ void AutoPNG::scale(AutoGDImage& img, unsigned int scale_bits) {
 	size_t scale = 1 << scale_bits;
 	size_t mask = scale - 1;
 	for (size_t i = 0; i < height; i++) {
-		if (png->row_number != i) DEBUG(errors)("ERROR: We are in row %zd but PNG is in %ld!\n", i, png->row_number);
+#if PNG_LIBPNG_VER>10600
+		if (png_get_current_row_number(png) != i) DEBUG(errors)("ERROR: We are in row %zd but PNG is in %ld!\n", i, (long int)png_get_current_row_number(png));
+#endif
 
 	//	png_byte* in = (png_byte*) &(img->tpixels[row_y + (row_xinc == 1 ? 0 : 1)][row_x]);
 		png_byte* in = row.ptr();
@@ -517,7 +514,7 @@ void AutoPNG::scale(AutoGDImage& img, unsigned int scale_bits) {
 void AutoPNG::trunc(AutoGDImage& img, unsigned int scale_bits) {
 	// First pass = 1/8, passes 1..3 = 1/4, passes 1..5 = 1/2.
 	int need_passes = 7 - scale_bits * 2;
-	DEBUG(resizer)("Loading interlaced %ldx%ld PNG to 1/%d, %d passes.\n", width, height, 1<<scale_bits, need_passes);
+	DEBUG(resizer)("Loading interlaced %ldx%ld PNG to 1/%d, %d passes.\n", (long int)width, (long int)height, 1<<scale_bits, need_passes);
 
 	// Could make the temp row less wide, but libpng accidentally
 	// writes the full row_bytes width even on earlier passes.
@@ -545,7 +542,9 @@ void AutoPNG::trunc(AutoGDImage& img, unsigned int scale_bits) {
 
 		//fprintf(stderr, "Starting pass %d, has %zd(%ld!) rows @%zd+%zd of %zd(%ld!) pixels @%zd+%zd.\n", pass, row_ynum, png->num_rows, row_y, row_yinc, row_xnum, png->iwidth, row_x, row_xinc);
 		for (size_t i = 0; i < row_ynum; i++) {
-			if (png->row_number != i) DEBUG(errors)("ERROR: We are in row %zd but PNG is in %ld!\n", i, png->row_number);
+#if PNG_LIBPNG_VER>10600
+			if (png_get_current_row_number(png) != i) DEBUG(errors)("ERROR: We are in row %zd but PNG is in %ld!\n", i, (long int)png_get_current_row_number(png));
+#endif
 
 		//	png_byte* in = (png_byte*) &(img->tpixels[row_y + (row_xinc == 1 ? 0 : 1)][row_x]);
 			png_byte* in = row.ptr();
@@ -618,6 +617,9 @@ resizer_result resize_image_data(const unsigned char* data, size_t len, unsigned
 
 	DEBUG(resizer)("Is %s %d x %d.\n", info.mime_type, info.width, info.height);
 
+	if (info.type == IMG_UNKNOWN)
+		throw imgdb::image_error("Unknown image format.");
+
 	if (thu_y == 0) {
 		if (info.width > info. height) {
 			thu_y = info.height * thu_x / info.width;
@@ -665,8 +667,7 @@ resizer_result resize_image_data(const unsigned char* data, size_t len, unsigned
 			img.set(gdImageCreateFromGifPtr(len, const_cast<unsigned char*>(data)));
 			gdImageFilledRectangle(thu, 0, 0, thu_x, thu_y, gdTrueColor(255, 255, 255));
 			break;
-		case IMG_BMP:
-		case IMG_UNKNOWN:
+		default:
 			throw imgdb::image_error("Unknown image format.");
 	};
 	if (!img) throw imgdb::image_error("Could not read image.");

@@ -1,2 +1,8 @@
+show blocked:
 select ip,INET_NTOA(ip) as addr,count,timestampdiff(minute,first,last) as dur_min,timestampdiff(minute,last,now()) as since_min from blocked;
+
+show requests grouped by IP:
+select ip,INET_NTOA(ip) as addr,count(*) as count,timestampdiff(minute,min(time),now()) as first_min,timestampdiff(minute,min(time),max(time)) as dur_min from requests group by ip order by count;
+
+block IP:
 insert ignore into blocked (ip) values(inet_aton("a.b.c.d"));

@@ -8,8 +8,10 @@ use URI::Escape;
 use File::Find;
 use Compress::Zlib;
 
-# danbooru-change [-l] tag [-d] [-r] [-m] [-w<num>] mode [max]
-# tag=site mode=update/full/deleted/rebuild/fromdb/imagecheck -l no lock -r no online update -m 404=missing -d delete IDs from iqdb DB first
+# danbooru-change [-l] tag [-d] [-r] [-m] [-w<num>] [-a<arg>] mode [max]
+# tag=site mode=update/full/deleted/rebuild/fromdb/imagecheck/fixid -l no lock -r no online update -m 404=missing -d delete IDs from iqdb DB first
+# args:
+# fixid -> ID will be removed from iqdb, and fetched again from the source site
 
 my $nolock = shift, 1 if @ARGV and $ARGV[0] eq '-l';
 die "No lockfile!\n" unless $nolock or -e "update.lock";
@@ -23,6 +25,8 @@ my $allow_missing = 0;
 $allow_missing = 1 if @ARGV and $ARGV[0] eq '-m' and shift;
 my $warnmax = 4;
 $warnmax = 0+$1 if @ARGV and $ARGV[0] =~ /-w(\d+)/ and shift;
+my $modearg;
+$modearg=$1 if @ARGV and $ARGV[0] =~ /-a(.*)/ and shift;
 my $mode = "update";
 $mode = shift if @ARGV and ($ARGV[0] =~ /^[a-z]+$/);
 my $max = 0+(shift||0);
@@ -41,7 +45,7 @@ $limit = 100;
 $dbver = 1;
 do "/home/iqdb/src/base.cfg" and -d $base and $iqdb_host or die "Can't get base settings: $!\n";
 do "/home/iqdb/src/$tag.cfg" and (defined $user and (defined $pw or defined $apikey) or %url) and $host and $table and $dbid and $db_file or die "Can't get DB settings: $!\n";
-$db_file="$base/doujin/db/iqdb/$db_file";
+$db_file="$base/iqdb/$db_file";
 die "$db_file does not exist\n" unless -e $db_file;
 chdir "$base/doujin/$tag" or die "Can't chdir: $!\n";
 $referrer = "http://$host/" unless $referrer;
@@ -73,7 +77,7 @@ my %md5;
 
 my $last_reason;
 
-sub failed {
+sub write_error {
 	if (defined $last_reason) {
 		open my $f, ">", ".last_reason";
 		print $f $last_reason;
@@ -83,10 +87,19 @@ sub failed {
 	my $failed = get_failed();
 	put_failed($failed + 1);
 	print STDERR "$tag: Failed $failed times before.\n", @_ if $failed;
+	return $failed;
+}
+sub failed {
+	my $failed = write_error(@_);
 	# only die for fourth and ninth message, then again after 4 hours and then every ~24 hours
 	print STDERR @_ and exit unless $failed == 3 or $failed == 8 or $failed == 24 or ($failed & 127) == 127;
 	die @_;
 };
+sub soft_fail {
+	write_error(@_);
+	print STDERR @_;
+	exit;
+}
 
 if ($mode eq 'fromdb') {
 	print "Finding images... ";
@@ -188,6 +201,14 @@ if ($mode eq 'fromdb' or $mode eq 'rebuild') {
 		push @tofetch, $id;
 	}
 	print scalar @tofetch, " inconsistent IDs to retrieve.\n";
+} elsif ($mode eq 'fixid') {
+	my $id = 0+$modearg or die "Missing -a<arg> argument for fixid mode.\n";
+	print "Fixing ID $id: delete from DB ";
+	$sth_del = $dbh->prepare("delete from $table where id=?") or exit 1;
+	my $res = $sth_del->execute($id);
+	print "$res; remove from iqdb and refetch\n";
+	push @remove, sprintf "0x%x", $id;
+	push @tofetch, $id;
 }
 
 AGAIN:
@@ -223,7 +244,7 @@ while(!$max or $cnt < $max) {
 				$_->{force_add} = 1 for @$posts;
 			}
 		}
-	} elsif ($mode eq 'imagecheck') {
+	} elsif ($mode eq 'imagecheck' or $mode eq 'fixid') {
 		if (!@tofetch) {
 			print "Checking iqdb DB IDs...\n";
 			while (my ($id, $val) = each %ids_db) {
@@ -284,7 +305,7 @@ while(!$max or $cnt < $max) {
 		print "Post $curid does not exist, removing from DB.\n";
 		$sth_del->execute($curid);
 		next;
-	} elsif ($mode eq 'imagecheck') {
+	} elsif ($mode eq 'imagecheck' or $mode eq 'fixid') {
 		if (@$posts == 0) {
 			print "Post $curid does not exist, removing from DB.\n";
 			$sth_del->execute($curid);
@@ -292,14 +313,16 @@ while(!$max or $cnt < $max) {
 		}
 		die "FAILED! GOT ".(scalar @$posts)." POSTS!\n" if @$posts != 1;
 		$_->{force_update} = 1 for @$posts;
-	}
-	if (@$posts < 2) {
+	} elsif (@$posts < 2) {
 		$last_max = undef;
 		print "No more posts, we're done!\n";
 		last;
 	}
+	my $abort;
 	for (@$posts) {
-		process() or $err++;
+		my $result = process();
+		$err++ unless $result;
+		$abort = 1 if $result == 404;
 		my $next_max = $max > -1 ? $max * 2 / 5 : 200;
 		if (time - $start_time > 60*10 and not $nolock) {
 			put_last("max", $next_max);
@@ -307,6 +330,7 @@ while(!$max or $cnt < $max) {
 			failed "$tag: Update taking over 10 minutes, aborting. Next time will try only $next_max\n";
 		}
 	}
+	soft_fail "$tag: Had 404, waiting.\n" if $abort;
 	failed "$tag: Had errors.\n" if $err;
 	failed "$tag: Had $warn warnings.\n" if $warn > $warnmax;
 
@@ -468,7 +492,10 @@ sub process {
 		print "$url -> $file:" and $quiet = 0 if $quiet;
 		my $alt_url = $_->{sample_url};
 		$alt_url = $_->{file_url} unless $alt_url;
-		retrieve($url, $alt_url, $md5, $file, $id, $resize) or $file = undef;
+		my $result = retrieve($url, $alt_url, $md5, $file, $id, $resize);
+		return 1 if defined $result and $result == 0;
+		return 404 if defined $result and $result == 404;
+		$file = undef unless defined $result;
 	}
 
 	if ($mode eq 'fromdb') {
@@ -534,28 +561,46 @@ sub process {
 	return defined $file;
 }
 
+sub fix_url {
+	my ($uri,$base) = @_;
+	my $thu_uri = URI->new($uri);
+	if (defined $thu_uri->scheme) {
+		return $uri;
+	} else {
+		my $base_uri = URI->new($base);
+		$base_uri->path("/");
+		$thu_uri = URI->new_abs($uri,$base_uri);
+		print " Relative URL.\nUsing $thu_uri instead: ";
+		return $thu_uri;
+	}
+}
+
 sub retrieve {
 	my ($url, $alt_url, $md5, $file, $id, $resize) = @_;
 	my $tmpfile = "new/$md5.jpg";
+	my $url_info = "Thumbnail";
 
 	# make relative uri absolute
-	my $thu_uri = URI->new($url);
-	unless (defined $thu_uri->scheme) {
-		my $base_uri = URI->new($req_url);
-		$base_uri->path("/");
-		$thu_uri = URI->new_abs($url,$base_uri);
-		print " Relative URL.\nUsing $thu_uri instead: ";
-		$url = $thu_uri;
-	}
+	$url = fix_url($url, $req_url);
 
 	unlink $tmpfile;
 	my $res = $ua->mirror($url, $tmpfile);
+	if (($res->code == 404 or -z $tmpfile) and $res->header("X-Cache") and $res->header("X-Cache") =~ /HIT/) {
+		print " 404(cache hit)\nTrying without cache: ";
+		$ua->default_header('Cache-Control' => 'no-cache');
+		$res = $ua->mirror($url, $tmpfile);
+	}
 	if (($res->code == 404 or -z $tmpfile) and $alt_url) {
 		$resize = 1;
-		$url = $alt_url;
+		$url = fix_url($alt_url, $req_url);
+		if ($url =~ m#\.webm$#) {	## deconfuse vim
+			print "SKIPPED (webm)\n";
+			return 0;
+		}
 		print " 404.\nTrying alternate URL $url: ";
 		unlink $tmpfile;
 		$res = $ua->mirror($url, $tmpfile);
+		$url_info = "$url_info $id is 404. Full image";
 	}
 	if (($res->code == 404 or -z $tmpfile) and $allow_missing) {
 		print " 404. Using Missing.png. ";
@@ -576,21 +621,31 @@ sub retrieve {
 		$warn++;
 		return;
 	}
-	#if ($res->code == 404) {
-	#	print "Skipped (404)\n";
-	#	print STDERR "$tag: $url ($id -> $md5): ".$res->status_line."\n";
-	#	#$warn++;
-	#	return 1;
-	#}
+	if ($res->code == 404 or -z $tmpfile) {
+		-d "missing" or mkdir "missing" or die "Create missing/: $!\n";
+		my $tagfile = "missing/$md5";
+		if (!-e $tagfile) {
+			open my $f, ">", $tagfile or die "Can't create $tagfile: $!\n";
+			print "404 tagged. ";
+		} elsif (-M $tagfile > 1) {
+			print "Skipped (still 404 after a day)\n";
+			print STDERR "$tag: $url ($id -> $md5): ".$res->status_line." skipped after 24 hr\n";
+			#$warn++;
+			return 0;
+		} else {
+			print "404 still. ";
+		}
+	}
 	if ($res->code >= 500) {
 		print "Failed (".$res->status_line.")! Aborting.\n";
-		$last_reason = "Thumbnail $id: " .$res->status_line;
+		$last_reason = "$url_info $id: " .$res->status_line;
 		failed "$tag: $url: ".$res->status_line."\n";
 	}
 	if (!$res->is_success and $res->code != 304) {
 		print "FAILED (".$res->code."). ";
 		print STDERR "$tag: $url ($id -> $md5): ".$res->status_line."\n";
-		$last_reason = "Thumbnail $id: " .$res->status_line;
+		$last_reason = "$url_info $id: " .$res->status_line;
+		return 404 if $res->code == 404;
 		return;
 	}
 
@@ -601,7 +656,7 @@ sub retrieve {
 		print "GIF/PNG! ", -s $tmpfile, " -> ";
 		my $tmp2 = "$tmpfile.jpg";
 		if (0 != system "to-jpeg", $tmpfile, $tmp2, 150, 80) {
-			$last_reason = "Thumbnail $id: not image file";
+			$last_reason = "$url_info $id: not image file";
 			failed "$tag: $id: Cannot convert to jpeg: $? $!\n";
 		}
 		unlink $tmpfile;
@@ -614,7 +669,7 @@ sub retrieve {
 		my $tmp2 = "$tmpfile-150.jpg";
 		if (0 != system "to-jpeg", $tmpfile, $tmp2, 150, 80) {
 			if ($? == -1 || $? & 127 || ($? >> 8) != 64) {
-				$last_reason = "Thumbnail $id: can't resize (not image file)";
+				$last_reason = "$url_info $id: can't resize (not image file)";
 				failed "$tag: $id: Cannot resize: $? $!\n";
 			}
 			print "Skipped (unsupported image format)\n";
@@ -629,6 +684,7 @@ sub retrieve {
 	my $jpeghdr = "\xFF\xD8\xFF"; #\xE0\x00\x10\x4A\x46\x49\x46";
 	if (substr($fhdr, 0, 3) ne $jpeghdr) {
 		return if $mode eq 'rebuild';
+		print STDERR "$tag: $id: Unexpected header", (map { sprintf " %02x", ord $_ } split //, $fhdr, length $jpeghdr), " (", $res->code, ")\n";
 		sysread $f, $fhdr, 128*1024, -1 or die "Can't read $tmpfile: $!\n";
 		if (-1 == index $fhdr, "No such file or directory: ") {
 			if ($url =~ /\.bmp$/) {
@@ -637,7 +693,7 @@ sub retrieve {
 			}
 			$fhdr = join " ", map { sprintf "%02x", ord $_ } split //, $fhdr, length $jpeghdr;
 			$jpeghdr = join " ", map { sprintf "%02x", ord $_ } split //, $jpeghdr;
-			$last_reason = "Thumbnail $id: not image file";
+			$last_reason = "$url_info $id: not image file";
 			failed "$tag: $id: No JPEG header:\nGot= $fhdr\nWant=$jpeghdr\n";
 		}
 		print "Failed (No such file or directory)\n";
@@ -793,6 +849,9 @@ sub new {
 }
 sub code {
 	return 500;
+}
+sub header {
+	return "";
 }
 sub is_success {
 	return 0;

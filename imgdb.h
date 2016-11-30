@@ -25,15 +25,22 @@
 #define IMGDBASE_H
 
 #include <stdint.h>
-#include <string.h>
+#include <stdlib.h>
+#include <string>
+#include <cstring>
 #include <math.h>
 
 // STL includes
 #include <map>
 #include <stdexcept>
 #include <vector>
+
+// unordered_map may still be in TR1
+#if defined(HAVE_UNORDERED_MAP)
 #include <unordered_map>
-#include <string>
+#elif defined(HAVE_TR1_UNORDERED_MAP)
+#include <tr1/unordered_map>
+#endif
 
 // Haar transform defines
 #include "haar.h"
@@ -65,10 +72,8 @@ value, use the FMT_count_t, FMT_offset_t, FMT_res_t and FMT_imageId macros
 as format specifier, e.g. printf("%08" FMT_imageId, id).
 */
 
-// Global typedefs and consts.
-typedef int32_t Score;
-typedef int64_t DScore;
 
+// Global typedefs and consts.
 #ifdef FORCE_64BIT
 typedef uint64_t imageId;
 typedef uint64_t count_t;
@@ -159,10 +164,27 @@ public:
 	const char* more() const throw() { return m_what; }
 };
 
+#ifdef INTMATH
+// fixme: make Score and DScore proper classes with conversion operators
+typedef int32_t Score;
+typedef int64_t DScore;
+
 const Score ScoreScale = 20;
 const Score ScoreMax = (1 << ScoreScale);
 
-typedef signed int lumin_int[3];
+template<typename T>
+inline Score MakeScore(T i) { return i << imgdb::ScoreScale; }
+#else
+typedef float Score;
+typedef float DScore;
+
+template<typename T>
+inline Score MakeScore(T i) { return i; }
+#endif
+
+typedef struct {
+	Score v[3];
+} lumin_native;
 
 struct sim_value {
 	sim_value(imageId i, Score s, unsigned int w, unsigned int h) : id(i), score(s), width(w), height(h) { }
@@ -173,9 +195,9 @@ struct sim_value {
 
 struct image_info {
 	image_info() { }
-	image_info(imageId i, const lumin_int& a, int w, int h) : id(i), width(w), height(h) { memcpy(avgl, a, sizeof(avgl)); }
+	image_info(imageId i, const lumin_native& a, int w, int h) : id(i), avgl(a), width(w), height(h) { }
 	imageId id;
-	lumin_int avgl;
+	lumin_native avgl;
 	union {
 		uint16_t width;
 		uint16_t set;
@@ -185,9 +207,14 @@ struct image_info {
 		uint16_t mask;
 	};
 
-	static void avglf2i(const double avglf[3], lumin_int avgl) {
-		for (int c = 0; c < 3; c++)
-			avgl[c] = lrint(ScoreMax * avglf[c]);
+	static void avglf2i(const double avglf[3], lumin_native& avgl) {
+		for (int c = 0; c < 3; c++) {
+#ifdef INTMATH
+			avgl.v[c] = lrint(ScoreMax * avglf[c]);
+#else
+			avgl.v[c] = avglf[c];
+#endif
+		}
 	};
 
 };
@@ -196,12 +223,15 @@ typedef std::vector<sim_value> sim_vector;
 typedef std::vector<std::pair<uint32_t, size_t> > stats_t;
 typedef std::vector<imageId> imageId_list;
 typedef std::vector<image_info> image_info_list;
-typedef signed int lumin_int[3];
 typedef Idx sig_t[NUM_COEFS];
 
-#ifndef NO_TR1
+#if defined(HAVE_UNORDERED_MAP)
 template<typename T>
 class imageIdMap : public std::unordered_map<imageId, T> {
+};
+#elif defined(HAVE_TR1_UNORDERED_MAP)
+template<typename T>
+class imageIdMap : public std::tr1::unordered_map<imageId, T> {
 };
 #else
 template<typename T>
@@ -256,7 +286,7 @@ struct queryArg : public queryOpt {
 	queryArg& reset() { queryOpt::reset(); return *this; }
 
 	sig_t		sig[3];
-	lumin_int	avgl;
+	lumin_native	avgl;
 	unsigned int	numres;
 };
 
